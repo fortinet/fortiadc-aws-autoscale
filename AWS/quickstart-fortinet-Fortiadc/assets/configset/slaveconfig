@@ -1,0 +1,12 @@
+
+config system auto-scale
+    set status enable
+    set sync-interface {SYNC_INTERFACE}
+    set role slave
+    set master-ip {MASTER_IP}
+    set callback-url {CALLBACK_URL}
+    set psksecret {PSK_SECRET}
+end
+config system global
+    set port-https {ADMIN_PORT}
+end

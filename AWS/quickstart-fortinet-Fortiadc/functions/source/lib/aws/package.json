@@ -1,0 +1,21 @@
+{
+  "name": "fortiadc-autoscale-aws",
+  "version": "1.0.0-alpha",
+  "description": "FortiADC Autoscale Module - Aws",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "files_to_deploy": [
+    "*.js",
+    "package.json"
+  ],
+  "dependencies": {
+    "fortiadc-autoscale-core": "file:../core"
+  },
+  "bundledDependencies": [
+    "fortiadc-autoscale-core"
+  ],
+  "author": "fortinet",
+  "license": "MIT"
+}
