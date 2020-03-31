@@ -1,21 +1,21 @@
 # quickstart-fortinet-fortiadc
 
-## Fortinet FortiGate Auto Scaling Baseline on the AWS Cloud
+## Fortinet FortiADC Auto Scaling Baseline on the AWS Cloud
 
-This Quick Start deploys FortiGate Auto Scaling, a next-generation firewall (NGFW) from Fortinet, on the Amazon Web Services (AWS) Cloud in about 15 minutes.
+This Quick Start deploys FortiADC Auto Scaling on the Amazon Web Services (AWS) Cloud in about 15 minutes.
 
-FortiGate mid-range next-generation firewalls (NGFWs) provide high performance, multi-layered advanced security, and better visibility to help protect against cyber attacks while reducing complexity. FortiGate firewalls are purpose-built with security processors to enable a high level of threat protection and performance for Secure Sockets Layer (SSL)-encrypted traffic.
+FortiADC Application Delivery Controllers (ADC) provides application availability, web optimization, and application security (WAF). The FortiADC family of physical and virtual appliances delivers fast, secure and intelligent acceleration and distribution of demanding applications in the enterprise. FortiADC delivers fast, secure and intelligent acceleration for demanding application environments. FortiADC virtual machines offer the same features of the FortiADC hardware-based appliances and provide the flexibility to add or spin down system resources to match usage demands and help control costs in dynamic application environments.
 
-This Quick Start deploys an automatically scaled group of FortiGate instances, which provide intrusion protection, web filtering, and threat detection to help protect your services from cyber attacks. The Quick Start uses AWS CloudFormation templates to build the AWS infrastructure and to deploy the FortiGates to help protect your workloads.
+This Quick Start deploys an automatically scaled group of FortiADC instances, which provide application availability, web optimization, and application security (WAF) to help protect your services from cyber attacks. The Quick Start uses AWS CloudFormation templates to build the AWS infrastructure and to deploy the FortiADCs to help protect your workloads.
 
 The Quick Start offers two deployment options:
 
- - [Deploying FortiGate into a new virtual private cloud (VPC) on AWS](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/new?stackName=FortigateASG&templateURL=https:%2F%2Fs3.amazonaws.com%2Faws-quickstart%2Fquickstart-fortinet-fortiadc%2Ftemplates%2Fworkload-master.template)
- - [Deploying FortiGate into an existing VPC on AWS](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/new?stackName=FortigateASG&templateURL=https:%2F%2Fs3.amazonaws.com%2Faws-quickstart%2Fquickstart-fortinet-fortiadc%2Ftemplates%2Fworkload.template)
+ - [Deploying FortiADC into a new virtual private cloud (VPC) on AWS](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/new?stackName=FortiadcASG&templateURL=https:%2F%2Fs3.amazonaws.com%2Faws-quickstart%2Fquickstart-fortinet-fortiadc%2Ftemplates%2Fworkload-master.template)
+ - [Deploying FortiADC into an existing VPC on AWS](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/new?stackName=FortiadcASG&templateURL=https:%2F%2Fs3.amazonaws.com%2Faws-quickstart%2Fquickstart-fortinet-fortiadc%2Ftemplates%2Fworkload.template)
 
 You can also use the AWS CloudFormation templates as a starting point for your own implementation.
 
-![Architecture diagram](https://d0.awsstatic.com/partner-network/QuickStart/datasheets/fortinet-fortigate-on-aws-architecture.png)
+![Architecture diagram](AWS/quickstart-fortinet-Fortiadc/Architecture.png)
 
 For architectural details, step-by-step instructions, and customization options, see the [deployment guide](https://fwd.aws/xjzgv). 
 

@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "pretest": "eslint --fix .",
-    "test": "nyc mocha --recursive './test/mocha/*.js'"
+    "test": "nyc mocha --recursive './test/mocha/*.js'",
+    "build-aws-lambda": "scripts/make-dist.js aws-lambda"
   },
   "author": "",
   "license": "MIT",
