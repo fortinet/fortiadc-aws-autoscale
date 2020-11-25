@@ -15,7 +15,7 @@ The Quick Start offers two deployment options:
 
 You can also use the AWS CloudFormation templates as a starting point for your own implementation.
 
-![Architecture diagram](AWS/quickstart-fortinet-Fortiadc/Architecture.png)
+![Architecture diagram](Architecture.png)
 
 For architectural details, step-by-step instructions, and customization options, see the [deployment guide](https://fwd.aws/xjzgv). 
 
