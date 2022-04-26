@@ -10,8 +10,8 @@ This Quick Start deploys an automatically scaled group of FortiADC instances, wh
 
 The Quick Start offers two deployment options:
 
- - [Deploying FortiADC into a new virtual private cloud (VPC) on AWS](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/new?stackName=FortiadcASG&templateURL=https:%2F%2Fs3.amazonaws.com%2Faws-quickstart%2Fquickstart-fortinet-fortiadc%2Ftemplates%2Fworkload-master.template)
- - [Deploying FortiADC into an existing VPC on AWS](https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/new?stackName=FortiadcASG&templateURL=https:%2F%2Fs3.amazonaws.com%2Faws-quickstart%2Fquickstart-fortinet-fortiadc%2Ftemplates%2Fworkload.template)
+ - [Deploying FortiADC into a new virtual private cloud (VPC) on AWS](https://us-west-2.console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/new?stackName=FortiadcASG&templateURL=https://aws-quickstart-fortiadc-autoscale.s3.us-west-2.amazonaws.com/quickstart-fortinet-Fortiadc/templates/workload-main.template)
+ - [Deploying FortiADC into an existing VPC on AWS](https://us-west-2.console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/new?stackName=FortiadcASG&templateURL=https://aws-quickstart-fortiadc-autoscale.s3.us-west-2.amazonaws.com/quickstart-fortinet-Fortiadc/templates/workload-main-with-VPC.template)
 
 You can also use the AWS CloudFormation templates as a starting point for your own implementation.
 

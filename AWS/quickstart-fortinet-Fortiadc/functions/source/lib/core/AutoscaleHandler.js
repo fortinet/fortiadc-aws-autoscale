@@ -8,7 +8,7 @@ Author: Fortinet
 * Use this class in various serverless cloud contexts. For each serverless cloud
 * implementation extend this class and implement the handle() method. The handle() method
 * should call other methods as needed based on the input events from that cloud's
-* autoscale mechanism and api gateway requests from the fortigate's callback-urls.
+* autoscale mechanism and api gateway requests from the fortiadc's callback-urls.
 * (see reference AWS implementation {@link AwsAutoscaleHandler})
 *
 * Each cloud implementation should also implement a concrete version of the abstract
@@ -16,7 +16,7 @@ Author: Fortinet
 * CloudPlatform interface should abstract each specific cloud's api. The reference
 * implementation {@link AwsPlatform} handles access to the dynamodb for persistence and
 * locking, interacting with the aws autoscaling api and determining the api endpoint url
-* needed for the fortigate config's callback-url parameter.
+* needed for the fortiadc config's callback-url parameter.
 */
 
 // const
@@ -48,12 +48,12 @@ module.exports = class AutoscaleHandler {
         return ip;
     }
 
-    async getMasterConfig(callbackUrl) {
+    async getPrimaryConfig(callbackUrl) {
         return await this._baseConfig.replace(/\$\{CALLBACK_URL}/, callbackUrl);
     }
 
-    // async getSlaveConfig(masterIp, callbackUrl, syncInterface, pskSecret, adminPort) {
-    getSlaveConfig(masterIp, callbackUrl, syncInterface, pskSecret, adminPort) {
+    // async getSecondaryConfig(primaryIp, callbackUrl, syncInterface, pskSecret, adminPort) {
+    getSecondaryConfig(primaryIp, callbackUrl, syncInterface, adminPort, cfg_sync_port) {
         /*
         const
             autoScaleSectionMatch = AUTOSCALE_SECTION_EXPR.exec(this._baseConfig), //fix this match later
@@ -71,57 +71,56 @@ module.exports = class AutoscaleHandler {
                         config system auto-scale
                             set status enable
                             set sync-interface ${syncInterface ? syncInterface : 'port1'}
-                            set role slave
-                            set master-ip ${masterIp}
+                            set role secondary
+                            set primary-ip ${primaryIp}
                             set callback-url ${apiEndpoint}
-                            set psksecret ${pskSecret? pskSecret:'123456789'}
+                            set config-sync-port ${cfg_sync_port}
                         end
                         config system global
                             set port-https ${adminPort? adminPort:'8443'}
-                            set port-http '80'
+                            set port-http '8080'
+                            set cloud-autoscale enable
                         end
                     `;
         let errorMessage;
         if (!apiEndpoint) {
             errorMessage = 'Api endpoint is missing';
         }
-        if (!masterIp) {
-            errorMessage = 'Master ip is missing';
+        if (!primaryIp) {
+            errorMessage = 'Primary ip is missing';
         }
         
-        if (!pskSecret) {
-            errorMessage = 'psksecret is missing';
-        }
-        if (!pskSecret || !apiEndpoint || !masterIp) {
+        
+        if (!apiEndpoint || !primaryIp) {
          
-       // if (!apiEndpoint || !masterIp) {
+       // if (!apiEndpoint || !primaryIp) {
              throw new Error(`Base config is invalid (${errorMessage}): ${
                     JSON.stringify({
                         syncInterface,
                         apiEndpoint,
-                        masterIp,
-                        pskSecret: pskSecret && typeof pskSecret
+                        primaryIp
                     })}`);
         }
         // await config.replace(SET_SECRET_EXPR, '$1 *');
         return config;
     }
 
-    async holdMasterElection(ip) {
+    async holdPrimaryElection(ip) {
         await this.throwNotImplementedException();
         return ip;
     }
 
-    async completeMasterInstance(instanceId) {
+    async completePrimaryInstance(instanceId) {
         await this.throwNotImplementedException();
         return instanceId;
     }
 
-    responseToHeartBeat(masterIp) {
+    responseToHeartBeat(primaryIp) {
         let response = {};
-        if (masterIp) {
-            response['master-ip'] = masterIp;
+        if (primaryIp) {
+            response['primary-ip'] = primaryIp;
         }
         return JSON.stringify(response);
     }
 };
+

@@ -1,0 +1,25 @@
+on:
+  push:
+   tags:
+     - '*'
+jobs:
+  build:
+    name: build-fortiadc-autoscale
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Get the version
+        id: get_version
+        run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+      - name: create release package
+        run: cd ./AWS/ && tar -zcvf ../fortiadc-autoscale.tar.gz . && cd -
+      - name: upload release package
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{secrets.GITHUB_TOKEN}}
+          release_name: Release ${{ steps.get_version.outputs.VERSION }}
+          file: ./fortiadc-autoscale.tar.gz
+          asset_name: fortiadc-autoscale.tar.gz
+          tag: ${{github.ref}}
+          overwrite: true
+          body: "FortiADC Autoscale Release"

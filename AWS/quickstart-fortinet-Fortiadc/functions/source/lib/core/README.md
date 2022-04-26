@@ -1,9 +1,9 @@
-# Fortigate Autoscale - Core
+# FortiADC Autoscale - Core
 
-`fortigate-autoscale/core` contains the core logic used to handle autoscaling groups of FortiGate VM instances in various cloud platforms.
+`fortiadc-autoscale/core` contains the core logic used to handle autoscaling groups of fortiadc VM instances in various cloud platforms.
 The provided classes are extended for each cloud platform in the neighbouring modules.
 
-The design metaphor for `fortigate-autoscale/core` is an api sandwich with cloud-specific layers on the outside and the core functionality in the middle.
+The design metaphor for `fortiadc-autoscale/core` is an api sandwich with cloud-specific layers on the outside and the core functionality in the middle.
 Leveraging this api requires extending the following:
 
 `CloudPlatform` is an _abstract_ class which implements all different cloud api functionality for each cloud
@@ -23,7 +23,7 @@ Please see the Project [README](../README.md) file for more information
 
 # Support
 Note Fortinet-provided scripts (in this GitHub project and others) are not supported within regular Fortinet technical support scope.
-For direct issues, please refer to the [Issues](https://github.com/fortinet/fortigate-autoscale/issues) tab of this GitHub project.
+For direct issues, please refer to the [Issues](https://github.com/fortinet/fortiadc-autoscale/issues) tab of this GitHub project.
 For other questions related to the Lambda scripts, contact [github@fortinet.com](mailto:github@fortinet.com).
 
 ## License

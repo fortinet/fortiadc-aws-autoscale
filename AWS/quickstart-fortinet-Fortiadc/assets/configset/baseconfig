@@ -2,12 +2,12 @@
 config system auto-scale
     set status enable
     set sync-interface "{SYNC_INTERFACE}"
-    set role master
+    set role primary
     set callback-url {CALLBACK_URL}
-    set psksecret {PSK_SECRET}
 end
 
 config system global
     set port-https {ADMIN_PORT}
     set port-http 8080
+	set cloud-autoscale enable
 end

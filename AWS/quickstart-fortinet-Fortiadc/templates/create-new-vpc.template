@@ -6,7 +6,7 @@
             "Type": "String",
             "AllowedPattern": "^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$",
             "ConstraintDescription": "Quick Start bucket name can include numbers, lowercase letters, uppercase letters, and hyphens (-). It cannot start or end with a hyphen (-).",
-            "Default": "aws-quickstart",
+            "Default": "aws-quickstart-fortiadc-autoscale",
             "Description": "The S3 bucket you have created for your copy of Quick Start assets, if you decide to customize or extend the Quick Start for your own use. The bucket name can include numbers, lowercase letters, uppercase letters, and hyphens, but should not start or end with a hyphen."
         },
         "QSS3KeyPrefix": {
@@ -15,6 +15,12 @@
             "ConstraintDescription": "Quick Start key prefix can include numbers, lowercase letters, uppercase letters, hyphens (-), and forward slash (/).",
             "Default": "quickstart-fortinet-Fortiadc/",
             "Description": "The S3 key name prefix used to simulate a folder for your copy of Quick Start assets, if you decide to customize or extend the Quick Start for your own use. This prefix can include numbers, lowercase letters, uppercase letters, hyphens, and forward slashes."
+        },
+        "ResourceTagPrefix": {
+            "Type": "String",
+            "AllowedPattern": "^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$",
+            "ConstraintDescription": "Resource tag prefix is composed of CustomIdentifier and UniqueID.",
+            "Description": "The Value for the Tag Key 'ResourceGroup' on all resources deployed in this stack."
         },
         "AvailabilityZones": {
             "Description": "The list of Availability Zones to use for the subnets in the VPC. The Quick Start uses two Availability Zones from your list and preserves the logical order you specify.",
@@ -40,20 +46,6 @@
             "AllowedPattern": "^(([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]){1}(\\/([0-9]|[1-2][0-9]|3[0-2]))?$",
             "ConstraintDescription": "must be a valid CIDR block format.",
             "Description": "The CIDR block for the public (DMZ) subnet located in Availability Zone 2."
-        },
-        "PrivateSubnet1CIDR": {
-            "Type": "String",
-            "Default": "10.0.1.0/24",
-            "AllowedPattern": "^(([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]){1}(\\/([0-9]|[1-2][0-9]|3[0-2]))?$",
-            "ConstraintDescription": "must be a valid CIDR block format.",
-            "Description": "The CIDR block for the private subnet located in Availability Zone 1."
-        },
-        "PrivateSubnet2CIDR": {
-            "Type": "String",
-            "Default": "10.0.3.0/24",
-            "AllowedPattern": "^(([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]){1}(\\/([0-9]|[1-2][0-9]|3[0-2]))?$",
-            "ConstraintDescription": "must be a valid CIDR block format.",
-            "Description": "The CIDR block for the private subnet located in Availability Zone 2."
         }
     },
     "Resources": {
@@ -63,6 +55,14 @@
                 "CidrBlock": {
                     "Ref": "VPCCIDR"
                 },
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
+                        }
+                    }
+                ],
                 "InstanceTenancy": "default",
                 "EnableDnsSupport": "true",
                 "EnableDnsHostnames": "true"
@@ -82,6 +82,14 @@
                         }
                     ]
                 },
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
+                        }
+                    }
+                ],
                 "VpcId": {
                     "Ref": "FadcAsgVpc"
                 }
@@ -101,44 +109,14 @@
                         }
                     ]
                 },
-                "VpcId": {
-                    "Ref": "FadcAsgVpc"
-                }
-            }
-        },
-        "PrivateSubnet1": {
-            "Type": "AWS::EC2::Subnet",
-            "Properties": {
-                "CidrBlock": {
-                    "Ref": "PrivateSubnet1CIDR"
-                },
-                "AvailabilityZone": {
-                    "Fn::Select": [
-                        0,
-                        {
-                            "Ref": "AvailabilityZones"
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
                         }
-                    ]
-                },
-                "VpcId": {
-                    "Ref": "FadcAsgVpc"
-                }
-            }
-        },
-        "PrivateSubnet2": {
-            "Type": "AWS::EC2::Subnet",
-            "Properties": {
-                "CidrBlock": {
-                    "Ref": "PrivateSubnet2CIDR"
-                },
-                "AvailabilityZone": {
-                    "Fn::Select": [
-                        1,
-                        {
-                            "Ref": "AvailabilityZones"
-                        }
-                    ]
-                },
+                    }
+                ],
                 "VpcId": {
                     "Ref": "FadcAsgVpc"
                 }
@@ -251,6 +229,14 @@
         "fadcPublicSubnetRouteTable": {
             "Type": "AWS::EC2::RouteTable",
             "Properties": {
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
+                        }
+                    }
+                ],
                 "VpcId": {
                     "Ref": "FadcAsgVpc"
                 }
@@ -286,14 +272,6 @@
                 "PublicSubnet2"
             ]
         },
-        "fadcPrivateSubnetAcl": {
-            "Type": "AWS::EC2::NetworkAcl",
-            "Properties": {
-                "VpcId": {
-                    "Ref": "FadcAsgVpc"
-                }
-            }
-        },
         "fadcPublicSubnetRoute1": {
             "Type": "AWS::EC2::Route",
             "Properties": {
@@ -307,52 +285,6 @@
             },
             "DependsOn": [
                 "fadcIgwAttachment"
-            ]
-        },
-        "fadcPrivateSubnet1RouteTable": {
-            "Type": "AWS::EC2::RouteTable",
-            "Properties": {
-                "VpcId": {
-                    "Ref": "FadcAsgVpc"
-                }
-            }
-        },
-        "fadcPrivateSubnet2RouteTable": {
-            "Type": "AWS::EC2::RouteTable",
-            "Properties": {
-                "VpcId": {
-                    "Ref": "FadcAsgVpc"
-                }
-            }
-        },
-        "fadcPrivateSubnet1RouteTableAssoc": {
-            "Type": "AWS::EC2::SubnetRouteTableAssociation",
-            "Properties": {
-                "RouteTableId": {
-                    "Ref": "fadcPrivateSubnet1RouteTable"
-                },
-                "SubnetId": {
-                    "Ref": "PrivateSubnet1"
-                }
-            },
-            "DependsOn": [
-                "fadcPrivateSubnet1RouteTable",
-                "PrivateSubnet1"
-            ]
-        },
-        "fadcPrivateSubnet2RouteTableAssoc": {
-            "Type": "AWS::EC2::SubnetRouteTableAssociation",
-            "Properties": {
-                "RouteTableId": {
-                    "Ref": "fadcPrivateSubnet2RouteTable"
-                },
-                "SubnetId": {
-                    "Ref": "PrivateSubnet2"
-                }
-            },
-            "DependsOn": [
-                "fadcPrivateSubnet2RouteTable",
-                "PrivateSubnet2"
             ]
         }
     },
@@ -376,9 +308,7 @@
                         "AvailabilityZones",
                         "VPCCIDR",
                         "PublicSubnet1CIDR",
-                        "PublicSubnet2CIDR",
-                        "PrivateSubnet1CIDR",
-                        "PrivateSubnet2CIDR"
+                        "PublicSubnet2CIDR"
                     ]
                 }
             ],
@@ -394,12 +324,6 @@
                 },
                 "PublicSubnet2CIDR": {
                     "default": "Public Subnet 2 CIDR"
-                },
-                "PrivateSubnet1CIDR": {
-                    "default": "Private Subnet 1 CIDR"
-                },
-                "PrivateSubnet2CIDR": {
-                    "default": "Private Subnet 2 CIDR"
                 }
             }
         }
@@ -421,30 +345,6 @@
             "Description": "Public Subnet 2 ID",
             "Value": {
                 "Ref": "PublicSubnet2"
-            }
-        },
-        "PrivateSubnet1": {
-            "Description": "Private Subnet 1 ID",
-            "Value": {
-                "Ref": "PrivateSubnet1"
-            }
-        },
-        "PrivateSubnet2": {
-            "Description": "Private Subnet 2 ID",
-            "Value": {
-                "Ref": "PrivateSubnet2"
-            }
-        },
-        "fadcPrivateSubnet1RouteTable": {
-            "Description": "Private Subnet 1 Route Table",
-            "Value": {
-                "Ref": "fadcPrivateSubnet1RouteTable"
-            }
-        },
-        "fadcPrivateSubnet2RouteTable": {
-            "Description": "Private Subnet 2 Route Table",
-            "Value": {
-                "Ref": "fadcPrivateSubnet2RouteTable"
             }
         }
     }

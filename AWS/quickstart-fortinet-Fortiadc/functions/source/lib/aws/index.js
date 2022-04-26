@@ -28,7 +28,6 @@ const
     s3 = new AWS.S3(),
     unique_id = process.env.UNIQUE_ID.replace(/.*\//, ''),
     custom_id = process.env.CUSTOM_ID.replace(/.*\//, ''),
-    // SCRIPT_TIMEOUT = 300,
     DB = {
         LIFECYCLEITEM: {
             AttributeDefinitions: [
@@ -101,6 +100,10 @@ const
                 {
                     AttributeName: 'voteState',
                     AttributeType: 'S'
+                },
+                {
+                    AttributeName: 'voteEndTime',
+                    AttributeType: 'S'
                 }
             ],
             KeySchema: [
@@ -110,7 +113,7 @@ const
                 }
             ],
             ProvisionedThroughput: { ReadCapacityUnits: 1, WriteCapacityUnits: 1 },
-            TableName: `${custom_id}-FortiadcMasterElection-${unique_id}`
+            TableName: `${custom_id}-FortiadcPrimaryElection-${unique_id}`
         },
         CONFIGSET: {
             AttributeDefinitions: [
@@ -162,7 +165,10 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             console.log('found table', schema.TableName);
         } catch (ex) {
             console.log('creating table ', schema.TableName);
-            await dynamodb.createTable(schema).promise();
+            await dynamodb.createTable(schema, function(err, data) {
+                if (err) logger.log(`create table ${schema.TableName} failed: ${err}, ${err.stack} `); // an error occurred
+                else     logger.log(`create table ${schema.TableName} success: ${data}`);           // successful response
+            }).promise();
         }
         await dynamodb.waitFor('tableExists', {TableName: schema.TableName}).promise();
     }
@@ -173,7 +179,9 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             logger.log('found table', schema.TableName);
             return true;
         } catch (ex) {
-            throw new Error(`table (${schema.TableName}) not exists!`);
+            logger.error(`table (${schema.TableName}) not exists!`);
+            await this.createTable(schema);
+            return true;
         }
     }
 
@@ -342,10 +350,10 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
     }
 
     /**
-     * Get the ip address which won the master election
-     * @returns {Object} Master record of the fortiadc which should be the auto-sync master
+     * Get the ip address which won the primary election
+     * @returns {Object} Primary record of the fortiadc which should be the auto-sync primary
      */
-    async getElectedMaster() {
+    async getElectedPrimary() {
         const
             params = {
                 TableName: DB.ELECTION.TableName,
@@ -360,54 +368,71 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             response = await docClient.scan(params).promise(),
             items = response.Items;
         if (!items || items.length === 0) {
-            logger.info('No elected master was found in the db!');
+            logger.info('No elected primary was found in the db!');
             return null;
         }
-        logger.info(`Elected master found: ${JSON.stringify(items[0])}`, JSON.stringify(items));
+        logger.info(`Elected primary found: ${JSON.stringify(items[0])}`, JSON.stringify(items));
         return items[0];
     }
-    async getMasterRecord() {
-        return await this.getElectedMaster();
-    }
-    async removeMasterRecord() {
-        // only purge the master with a done votestate to avoid a
-        // race condition
+    async removePrimaryRecord() {
         const params = {
             TableName: DB.ELECTION.TableName,
             Key: {
-                // asgName: process.env.AUTO_SCALING_GROUP_NAME,
-                // votestate: "done"
                 asgName: process.env.AUTO_SCALING_GROUP_NAME
             } 
         };
         return await docClient.delete(params).promise();
     }
-    async finalizeMasterElection() {
+    async attachElasticIP(instanceId) {
         try {
-            logger.info('calling finalizeMasterElection');
-            let electedMaster = await this.getElectedMaster();
-            electedMaster.voteState = 'done';
+            logger.log(`${instanceId} calling attachElasticIP`);
+            let elasticIP = process.env.ElasticIP;
+    
+            let asso_params = {
+                AllowReassociation: true,
+                PublicIp: elasticIP,
+                InstanceId: instanceId
+            };
+            let result1 = await ec2.associateAddress(asso_params).promise();
+            logger.log('EIP association result' + `${JSON.stringify(result1)}`);
+        } catch (ex) {
+            logger.warn(`${instanceId} called attachElasticIP, error:`, ex.stack);
+            return false;
+        }
+    }
+
+    async finalizePrimaryElection(instanceID, primary_record = null) {
+        try {
+            logger.info(`${instanceID} calling finalizePrimaryElection`);
+            let electedPrimary, elected_id;
+            if (!primary_record) electedPrimary = await this.getElectedPrimary();
+            else electedPrimary = primary_record;
+            electedPrimary.voteState = 'done';
+            elected_id = electedPrimary.instanceId;
+            logger.info(`hello : ${JSON.stringify(electedPrimary)}`);
             const params = {
                 TableName: DB.ELECTION.TableName,
-                Item: electedMaster
+                Item: electedPrimary
             };
-            let result = await docClient.put(params).promise();
-            logger.info(`called finalizeMasterElection, result: ${JSON.stringify(result)}`);
+            let result = await docClient.put(params, function(err, data) {
+                if (err) {logger.info(`${instanceID} called finalizePrimaryElection, result: ${JSON.stringify(err)}`);}
+            }).promise();
+            
+            await this.attachElasticIP(electedPrimary.instanceId);
+            logger.info(`${instanceID} called finalizePrimaryElection, result: ${JSON.stringify(result)}`);
             return result;
         } catch (ex) {
-            logger.warn('called finalizeMasterElection, error:', ex.stack);
+            logger.warn(`${instanceID} called finalizePrimaryElection, error:`, ex.stack);
             return false;
         }
     }
     async addConfig(heartBeatLossCount = 5, heartDelayAllowance = 60) {
-        logger.info('calling addConfig');
-        
         var searchparams = {
             Key: {
                 configName: 'heartBeatAllowLossCount'
             },
             TableName: DB.CONFIGSET.TableName
-        }
+        };
         var data = await docClient.get(searchparams).promise();
         if (!data.Item) {
             console.log('no heartBeatLossCount');
@@ -427,7 +452,7 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 configName: 'heartDelayAllowance'
             },
             TableName: DB.CONFIGSET.TableName
-        }
+        };
         data = await docClient.get(searchparams).promise();
         if (!data.Item) {
             console.log('no heartDelayAllowance');
@@ -444,9 +469,96 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             heartDelayAllowance = data.Item.value;
         }
         
-        return [heartBeatLossCount, heartDelayAllowance]
+        return [heartBeatLossCount, heartDelayAllowance];
     }
-
+    async addConfigSyncPort(cfgsyncport = 10443) {
+        let port = 10443;
+        if (cfgsyncport != -1) {
+            port = cfgsyncport;
+        }
+        var searchparams = {
+            Key: {
+                configName: 'configSyncPort'
+            },
+            TableName: DB.CONFIGSET.TableName
+        };
+        var params = {
+            Item: {
+                configName: 'configSyncPort',
+                value: port
+            },
+            TableName: DB.CONFIGSET.TableName
+        };
+        var data = await docClient.get(searchparams).promise();
+        if (!data.Item) {
+            console.log('no configSyncPort');
+            await docClient.put(params).promise();
+            return port;
+        } else {
+            if (cfgsyncport != -1 && data.Item.value != cfgsyncport) {
+                params = {
+                    Item: {
+                        configName: 'configSyncPort',
+                        value: cfgsyncport
+                    },
+                    TableName: DB.CONFIGSET.TableName
+                };
+                await docClient.put(params).promise();
+                return cfgsyncport;
+            }
+            return data.Item.value;
+        }
+    }
+    async addFortiADCImageVersion(image, is_primary=false) {
+        
+        var searchparams = {
+            Key: {
+                configName: 'FortiADCImageVersion'
+            },
+            TableName: DB.CONFIGSET.TableName
+        };
+        var params = {
+            Item: {
+                configName: 'FortiADCImageVersion',
+                value: image
+            },
+            TableName: DB.CONFIGSET.TableName
+        };
+        
+        if (is_primary) {
+            console.log(`Update FortiADC Image Version to ${image}`);
+            await docClient.put(params).promise();
+            return image;
+        }
+        var data = await docClient.get(searchparams).promise();
+        if (data && data.Item) {
+            return data.Item.value;
+        }
+        return "";
+    }
+    async getInstanceBornTime(instanceId) {
+        if (!instanceId) {
+            logger.error('getInstanceBornTime > error: no instanceId property found' +
+            ` on instance: ${instanceId}`);
+            return -1;
+        }
+        var params = {
+            Key: {
+                instanceId: instanceId
+            },
+            TableName: DB.AUTOSCALE.TableName
+        };
+       
+            
+        let data = await docClient.get(params).promise();
+        if (!data.Item) {
+             logger.error('getInstanceBornTime > error: no instance found' +
+            ` on instance: ${instanceId}`);
+            return -1;
+        }
+        
+        return data.Item.bornTime;
+    }
     /**
      * get the health check info about an instance been monitored.
      * @param {Object} instance instance object which a vmId property is required.
@@ -494,7 +606,7 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             interval = heartBeatInterval && !isNaN(heartBeatInterval) ?
                 heartBeatInterval : healthCheckRecord.heartBeatInterval;
             heartBeatDelays = scriptExecutionStartTime - healthCheckRecord.nextHeartBeatTime;
-            // The the inevitable-fail-to-sync time is defined as:
+            // The inevitable-fail-to-sync time is defined as:
             // the maximum amount of time for an instance to be able to sync without being
             // deemed unhealth. For example:
             // the instance has x (x < hb loss count allowance) loss count recorded.
@@ -525,7 +637,7 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 // healthy unless the the inevitable-fail-to-sync time has passed.
                 healthy = scriptExecutionStartTime <= inevitableFailToSyncTime;
                 heartBeatLossCount = healthCheckRecord.heartBeatLossCount + 1;
-                logger.info(`hb sync is late${heartBeatLossCount > 1 ? ' again' : ''}.\n` +
+                logger.info(`Instance ${instance.instanceId}: hb sync is late${heartBeatLossCount > 1 ? ' again' : ''}.\n` +
                     `hb loss count becomes: ${heartBeatLossCount},\n` +
                     `hb sync delay allowance: ${heartBeatDelayAllowance} ms\n` +
                     'expected hb arrived time: ' +
@@ -548,7 +660,7 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 }
             }
             logger.info('called getInstanceHealthCheck. (timestamp: ' +
-                `${scriptExecutionStartTime},  interval:${heartBeatInterval})` +
+                `${scriptExecutionStartTime},  interval:${interval})` +
                 'healthcheck record:',
                 JSON.stringify(healthCheckRecord));
             return {
@@ -558,9 +670,6 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 heartBeatLossCount: heartBeatLossCount,
                 heartBeatInterval: interval,
                 nextHeartBeatTime: Date.now() + interval * 1000,
-                // masterIp: healthCheckRecord.masterIp,
-                // syncState: healthCheckRecord.syncState,
-                // inSync: healthCheckRecord.syncState === 'in-sync',
                 inevitableFailToSyncTime: inevitableFailToSyncTime,
                 healthCheckTime: scriptExecutionStartTime
             };
@@ -571,7 +680,7 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             return null;
         }
     }
-    async updateInstanceHealthCheck(healthCheckObject, heartBeatInterval, masterIp, checkPointTime,
+    async updateInstanceHealthCheck(healthCheckObject, heartBeatInterval, primaryIp, checkPointTime,
         forceOutOfSync = false) {
         if (!(healthCheckObject && healthCheckObject.instanceId)) {
             logger.error('updateInstanceHealthCheck > error: no instanceId property found' +
@@ -592,9 +701,6 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                     ':HeartBeatLossCount': healthCheckObject.heartBeatLossCount,
                     ':HeartBeatInterval': heartBeatInterval,
                     ':NextHeartBeatTime': checkPointTime + heartBeatInterval * 1000
-                    // ':MasterIp': masterIp ? masterIp : 'null',
-                    // ':SyncState': healthCheckObject.healthy && !forceOutOfSync ?
-                    //    'in-sync' : 'out-of-sync'
                 },
                 ConditionExpression: 'attribute_exists(instanceId)'
             };
@@ -612,7 +718,70 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             return Promise.reject(error);
         }
     }
+    async removeOutdatedInstanceHealthCheck(aliveinstanceId) {
+        try {
+            let 
+                awaitAll = [],
+                unhealthyInstances = [],
+                data = await docClient.scan({
+                    TableName: DB.AUTOSCALE.TableName
+                }).promise();
 
+            let items = data.Items;
+            if (!(items && items.length)) {
+                logger.info('removeOudatedInstanceHealthCheck: there is no healthcheck item');
+                return null;
+            }
+            var params = {
+                AutoScalingGroupNames: [
+                    process.env.AUTO_SCALING_GROUP_NAME,
+             ]
+            };
+            let autoscaledata = await autoScaling.describeAutoScalingGroups(params).promise();
+            let instance_ids = [];
+    
+            autoscaledata.AutoScalingGroups.forEach(asg_resp => {
+                asg_resp.Instances.forEach(instance => {
+                    if (instance.LifecycleState === "InService") {
+                        instance_ids.push(instance.InstanceId);
+                    }
+                });
+            });
+            
+            let item_healthy = async item => {
+                if (item.instanceId === aliveinstanceId) {
+                    return true;
+                }
+                if (instance_ids.includes(item.instanceId)) {
+                    return true;
+                }
+                unhealthyInstances.push(item.instanceId);
+                return false;
+            };
+            items.forEach(item => {
+                awaitAll.push(item_healthy(item));
+            });
+            await Promise.all(awaitAll);
+            
+            if (unhealthyInstances.length === 0) {
+                logger.info('removeOudatedInstanceHealthCheck: no unhealthy instances');
+                return null;
+            }
+            awaitAll = [];
+            let deleteUnhealthItem = async instanceId => {
+                return await this.deleteInstanceHealthCheck(instanceId);
+            };
+            
+            unhealthyInstances.forEach(instanceId => {
+                awaitAll.push(deleteUnhealthItem(instanceId));
+            });
+            logger.info('called removeOudatedInstanceHealthCheck');
+        } catch (error) {
+            logger.info('called removeOudatedInstanceHealthCheck with error. ' +
+            `error: ${JSON.stringify(error)}`);
+            return null;
+        }
+    }
     async deleteInstanceHealthCheck(instanceId) {
         try {
             let params = {
@@ -635,7 +804,11 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
      * @param {Object} parameters parameters accepts: instanceId, privateIp, publicIp
      */
     async describeInstance(parameters) {
-        logger.info('calling describeInstance');
+        if (parameters.instanceId) {
+            logger.info(`${parameters.instanceId}: `+'calling describeInstance');
+        } else {
+            logger.info('calling describeInstance');
+        }
         let params = {Filters: []};
         if (parameters.instanceId) {
             params.Filters.push({
@@ -657,7 +830,7 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             });
         }
         const result = await ec2.describeInstances(params).promise();
-        logger.info(`called describeInstance, result: ${JSON.stringify(result)}`);
+        logger.info(`${parameters.instanceId}: called describeInstance, result: ${JSON.stringify(result)}`);
         return result.Reservations[0] && result.Reservations[0].Instances[0];
     }
 
@@ -720,9 +893,9 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
         this._selfInstance = null;
         this._init = false;
         this._selfHealthCheck = null;
-        this._masterRecord = null;
-        this._masterInfo = null;
-        this._masterHealthCheck = null;
+        this._primaryRecord = null;
+        this._primaryInfo = null;
+        this._primaryHealthCheck = null;
     }
 
     async init() {
@@ -760,7 +933,7 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 result = await this.handleGetConfig(event);
                 callback(null, proxyResponse(200, result));
             } else {
-                this._step = '¯\\_(ツ)_/¯';
+                this._step = '';
 
                 logger.log(`${this._step} unexpected event!`, event);
                 // probably a test call from the lambda console?
@@ -800,13 +973,14 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
     }
 
     /**
-     * Submit an election vote for this ip address to become the master.
-     * @param {Object} candidateInstance instance of the fortiadc which wants to become the master
-     * @param {Object} purgeMasterRecord master record of the old master, if it's dead.
+     * Submit an election vote for this ip address to become the primary.
+     * @param {Object} candidateInstance instance of the fortiadc which wants to become the primary
+     * @param {Object} purgePrimaryRecord primary record of the old primary, if it's dead.
      */
-    async putMasterElectionVote(candidateInstance, purgeMasterRecord = null) {
+    async putPrimaryElectionVote(candidateInstance, original_primary_id = "", purgePrimaryRecord = null) {
+        //Elect the instance with state "InService" and with the earliest born time
         try {
-            const params = {
+            let params = {
                 TableName: DB.ELECTION.TableName,
                 Item: {
                     asgName: process.env.AUTO_SCALING_GROUP_NAME,
@@ -814,105 +988,204 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     instanceId: candidateInstance.InstanceId,
                     vpcId: candidateInstance.VpcId,
                     subnetId: candidateInstance.SubnetId,
-                    voteState: 'pending'
+                    voteState: 'pending',
+                    voteEndTime: process.env.SCRIPT_EXECUTION_EXPIRE_TIME - 6000
+                    
                 },
                 ConditionExpression: 'attribute_not_exists(asgName)'
             };
-            logger.log('masterElectionVote, purge master?', JSON.stringify(purgeMasterRecord));
-            if (purgeMasterRecord) {
+            logger.log(`PrimaryElectionVote, purge Primary ${original_primary_id} ?`, JSON.stringify(purgePrimaryRecord));
+            if (purgePrimaryRecord) {
                 try {
-                    const purged = await this.purgeMaster(process.env.AUTO_SCALING_GROUP_NAME);
-                    logger.log('purged: ', purged);
+                    let purged = await this.purgePrimary(process.env.AUTO_SCALING_GROUP_NAME);
+                    logger.log('purged primary : ', purged);
+                    if (original_primary_id){
+                        await this.deleteInstanceHealthCheck(original_primary_id);
+                    }
                 } catch (error) {
-                    logger.log('no master purge');
+                    logger.log('no Primary purge');
                 }
             } else {
-                logger.log('no master purge');
+                logger.log('no Primary purge');
             }
+            //select new Primary
+            
+            let healthyInstances = [],
+                InserviceInstances = [],
+                awaitAll = [],
+                bornTimesInstances = [];
+            var autosclaing_params = {
+                AutoScalingGroupNames: [
+                    process.env.AUTO_SCALING_GROUP_NAME,
+                ]
+            };
+            let autoscaledata = await autoScaling.describeAutoScalingGroups(autosclaing_params).promise();
+        
+            autoscaledata.AutoScalingGroups.forEach(asg_resp => {
+                asg_resp.Instances.forEach(instance => {
+                    if (instance.LifecycleState === "InService" && instance.InstanceId != original_primary_id) {
+                        //should exclude the original primary
+                        InserviceInstances.push(instance.InstanceId);
+                    }
+                });
+            });
+            
+            if (!(InserviceInstances && InserviceInstances.length)) {
+                logger.info('putPrimaryElectionVote() called, but no instance in service. At init stage!');
+                logger.info(`Put calling instance ${candidateInstance.InstanceId} into election`);
+                return !!await docClient.put(params).promise();
+                
+            }
+            logger.log(`InService instance count(${InserviceInstances.length}), members: (${JSON.stringify(InserviceInstances)})`);
+        
+            let gethealthyitem = async instanceId => {
+                let hcresult = await this.platform.getInstanceHealthCheck({
+            instanceId: instanceId});
+                if (!hcresult) {
+                   logger.log('No healthcheck record. It is at init stage');
+                }
+                if (!hcresult || hcresult.healthy) {
+                    healthyInstances.push(instanceId);
+                }
+            };
+            InserviceInstances.forEach(instanceId => {
+                awaitAll.push(gethealthyitem(instanceId));
+            });
+            await Promise.all(awaitAll);
+            awaitAll = [];
+            if (!(healthyInstances && healthyInstances.length)) {
+                logger.error('putPrimaryElectionVote() called, but no healthy instance found. ' +
+                            'should not happen!');
+                return false;
+                
+            }
+            logger.log(`HealthyInstances count(${healthyInstances.length}), members: (${JSON.stringify(healthyInstances)})`);
+            
+            let getBornTime = async instanceId => {
+                let bornTime = await this.platform.getInstanceBornTime(instanceId);
+                if (bornTime > 0) {
+                    bornTimesInstances.push({instanceId: instanceId, bornTime: bornTime});
+                }
+            };
+            healthyInstances.forEach(instanceId => {
+                awaitAll.push(getBornTime(instanceId));
+            });
+            await Promise.all(awaitAll);
+            logger.info(`bornTimesInstances count(${bornTimesInstances.length}),` +
+                        `members: (${JSON.stringify(bornTimesInstances)})`);
+            if (!(bornTimesInstances && bornTimesInstances.length)) {
+                logger.info('putPrimaryElectionVote() called, but no bornTimes found. The instance may not send sync callback yet');
+                logger.info(`Put calling instance ${candidateInstance.InstanceId} into election`);
+                return !!await docClient.put(params).promise();
+            }
+
+            let eaylyestTime = 0,
+                primaryInstanceId = null;
+            bornTimesInstances.forEach(bornTimesInstance => {
+                let bornTime = bornTimesInstance.bornTime;
+                if (eaylyestTime === 0) {
+                    eaylyestTime = bornTime;
+                    primaryInstanceId = bornTimesInstance.instanceId;
+                } else if (bornTime < eaylyestTime) {
+                    eaylyestTime = bornTime;
+                    primaryInstanceId = bornTimesInstance.instanceId;
+                }
+            });
+            if (primaryInstanceId === null) {
+                logger.error('putPrimaryElectionVote() called, but no earlyest instance found. ' +
+                            'should not happen!');
+                logger.error(`Put calling instance ${candidateInstance.InstanceId} into election due to no earlyest instance found`);
+                return !!await docClient.put(params).promise();
+            }
+            logger.info(`new selected primary (instanceId: ${primaryInstanceId})`);
+            let seeded_primary = await this.platform.describeInstance({instanceId: primaryInstanceId});
+            params = {
+                TableName: DB.ELECTION.TableName,
+                Item: {
+                    asgName: process.env.AUTO_SCALING_GROUP_NAME,
+                    ip: seeded_primary.PrivateIpAddress,
+                    instanceId: seeded_primary.InstanceId,
+                    vpcId: seeded_primary.VpcId,
+                    subnetId: seeded_primary.SubnetId,
+                    voteState: 'pending',
+                    voteEndTime: process.env.SCRIPT_EXECUTION_EXPIRE_TIME - 6000
+                },
+                ConditionExpression: 'attribute_not_exists(asgName)'
+            };
             return !!await docClient.put(params).promise();
         } catch (ex) {
-            console.warn('exception while putMasterElectionVote',
-                JSON.stringify(candidateInstance), JSON.stringify(purgeMasterRecord), ex.stack);
+            console.warn('exception while putPrimaryElectionVote',
+                JSON.stringify(candidateInstance), JSON.stringify(purgePrimaryRecord), ex.stack);
             return false;
         }
     }
 
-    async holdMasterElection(instance) {
-        // do not need to do anything for master election
+    async holdPrimaryElection(instance) {
+        // do not need to do anything for primary election
         return await instance;
     }
 
-    async electMaster() {
-        // return the current master record
-        return !!await this.platform.getElectedMaster();
-    }
-    async checkMasterElection() {
-        logger.info('calling checkMasterElection');
+    async checkPrimaryElection() {
+        logger.info(`${this._selfInstance.InstanceId}: ` + 'calling checkPrimaryElection');
         let needElection = false,
-            purgeMaster = false,
+            purgePrimary = false,
             electionLock = false,
-            electionComplete = false;
+            electionComplete = false,
+            original_primary_id = "";
 
-        // reload the master
-        await this.retrieveMaster(null, true);
-        logger.info('current master healthcheck:', JSON.stringify(this._masterHealthCheck));
-        // is there a master election done?
-        // check the master record and its voteState
-        // if there's a complete election, get master health check
-        if (this._masterRecord && this._masterRecord.voteState === 'done') {
-            // if master is unhealthy, we need a new election
-            if (!this._masterHealthCheck ||
-                !this._masterHealthCheck.healthy) {
-                purgeMaster = needElection = true;
-            } else {
-                purgeMaster = needElection = false;
-            }
-        } else if (this._masterRecord && this._masterRecord.voteState === 'pending') {
-            // if there's a pending master election, and if this election is incomplete by
-            // the end-time, purge this election and starta new master election. otherwise, wait
-            // until it's finished
-            // needElection = purgeMaster = Date.now() > this._masterRecord.voteEndTime;
-            // wait for it to complete
-            purgeMaster = needElection = false;
-        } else {
-            // if no master, try to hold a master election
-            needElection = true;
-            purgeMaster = false;
+        // reload the primary
+        await this.retrievePrimary(null, true);
+        if (this._primaryRecord) {
+            original_primary_id = this._primaryRecord.instanceId;
         }
-        // if we need a new master, let's hold a master election!
-        // 2019/01/14 add support for cross-scaling groups election
-        // only instance comes from the masterScalingGroup can start an election
-        // all other instances have to wait
+        logger.info('current primary node healthcheck:', JSON.stringify(this._primaryHealthCheck));
+        
+        
+        if (this._primaryRecord && this._primaryRecord.voteState === 'done') {
+            // if primary is unhealthy, we need a new election
+            if (!this._primaryHealthCheck ||
+                !this._primaryHealthCheck.healthy) {
+                purgePrimary = needElection = true;
+            } else {
+                purgePrimary = needElection = false;
+            }
+        } else if (this._primaryRecord && this._primaryRecord.voteState === 'pending') {
+            // if there's a pending primary election, and if this election is incomplete by
+            // the end-time, purge this election and start a new primary election. otherwise, wait
+            // until it's finished
+            needElection = purgePrimary = Date.now() > this._primaryRecord.voteEndTime;
+            if (needElection) {
+                logger.warn('Elected primary '+ this._primaryRecord.instanceId + ' is pending timeout. Purge it.');
+            }
+        } else {
+            // if no primary, try to hold a primary election
+            needElection = true;
+            purgePrimary = false;
+        }
         if (needElection) {
            
-            // try to put myself as the master candidate
-            electionLock = await this.putMasterElectionVote(this._selfInstance, purgeMaster);
+            // try to put myself as the primary candidate
+            electionLock = await this.putPrimaryElectionVote(this._selfInstance, original_primary_id, purgePrimary);
             if (electionLock) {
-                    // yes, you run it!
-                logger.info(`This instance (id: ${this._selfInstance.InstanceId})` +
-                    ' is running an election.');
                 try {
-                    // (diagram: elect new master from queue (existing instances))
-                    electionComplete = await this.electMaster();
+                    this._primaryRecord = await this.platform.getElectedPrimary();
+                    electionComplete = !!this._primaryRecord;
                     logger.info(`Election completed: ${electionComplete}`);
-                        // (diagram: master exists?)
-                    this._masterRecord = null;
-                    this._masterInfo = electionComplete && await this.getMasterInfo();
+                    this._primaryInfo = electionComplete && await this.getPrimaryInfo(this._primaryRecord.instanceId, this._primaryRecord.ip);
+                    this._primaryRecord = null;
+                    
                     } catch (error) {
-                        logger.error('Something went wrong in the master election.');
+                        logger.error('Something went wrong in the primary election.');
                     }
-                } else {
-                    // election returned false, delete the current master info. do the election
-                    // again
-                    this._masterRecord = null;
-                    this._masterInfo = null;
-                }
-            
+            } else {
+                // election returned false, delete the current primary info. do the election
+                // again
+                this._primaryRecord = null;
+                this._primaryInfo = null;
+            }
         }
-        return Promise.resolve(this._masterInfo); // return the new master
+        return Promise.resolve(this._primaryInfo); // return the new primary
     }
-
-
 
     async getConfigSetFromDb(name) {
         const query = {
@@ -958,12 +1231,11 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 configContent = await this.getConfigSetFromS3('internalelbweb') + configContent;
             }
             baseConfig = baseConfig + configContent;
-            let psksecret = process.env.FORTIADC_PSKSECRET;
+
             baseConfig = baseConfig
                 .replace(new RegExp('{SYNC_INTERFACE}', 'gm'),
                     process.env.FORTIADC_SYNC_INTERFACE ?
                         process.env.FORTIADC_SYNC_INTERFACE : 'port1')
-                .replace(new RegExp('{PSK_SECRET}', 'gm'), psksecret)
                 .replace(new RegExp('{ADMIN_PORT}', 'gm'),
                     process.env.FORTIADC_ADMIN_PORT ? process.env.FORTIADC_ADMIN_PORT : 8443);
         }
@@ -971,24 +1243,15 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
     }
 
     // override
-    async getMasterConfig(callbackUrl) {
+    async getPrimaryConfig(callbackUrl) {
         // no dollar sign in place holders
         return await this._baseConfig.replace(/\{CALLBACK_URL}/, callbackUrl);
     }
 
-    async getMasterInfo() {
-        logger.info('calling getMasterInfo');
-        let masterRecord, masterIp;
-        try {
-            masterRecord = await this.platform.getElectedMaster();
-            if (masterRecord === null) {
-                return null;
-            }
-            masterIp = masterRecord.ip;
-        } catch (ex) {
-            logger.error(ex.message);
-        }
-        return masterRecord && await this.platform.describeInstance({privateIp: masterIp});
+    async getPrimaryInfo(instanceId, primaryIp) {
+        logger.info('calling getPrimaryInfo');
+       
+        return await this.platform.describeInstance({instanceId:instanceId, privateIp: primaryIp});
     }
 
     /* ==== Sub-Handlers ==== */
@@ -1011,10 +1274,17 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 }
                 break;
             case 'EC2 Instance-terminate Lifecycle Action':
+                /*
                 if (event.detail.LifecycleTransition === 'autoscaling:EC2_INSTANCE_TERMINATING') {
                     await this.platform.cleanUpDbLifeCycleActions();
                     result = await this.handleTerminatingInstanceHook(event);
                 }
+                */
+                
+                break;
+            case 'EC2 Instance Terminate Successful':
+                await this.platform.cleanUpDbLifeCycleActions();
+                result = await this.handleTerminatingInstanceHook(event);
                 break;
             default:
                 logger.warn(`Ignore autoscaling event type: ${event['detail-type']}`);
@@ -1035,31 +1305,65 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             heartBeatInterval = this.findHeartBeatInterval(event),
             fortiadcStatus = this.findFortiADCStatus(event),
             statusSuccess = fortiadcStatus && fortiadcStatus === 'success' || false;
-        // if fortiadc is sending callback in response to obtaining config, this is a state
-        // message
         let parameters = {}, selfHealthCheck;
 
         parameters.instanceId = callingInstanceId;
-        // handle hb monitor
-        // get master instance monitoring
-        // let masterInfo = await this.getMasterInfo();
-        await this.retrieveMaster();
-        // TODO: master health check
+        //check if the instance is in ASG
+        var params = {
+          InstanceIds: [
+            callingInstanceId
+          ]
+        };
+        let data = await autoScaling.describeAutoScalingInstances(params).promise();
 
-        this._selfInstance = await this.platform.describeInstance(parameters);
-        // if it is a response from fgt for getting its config
-        if (fortiadcStatus) {
-            // handle get config callback
-            return await this.handleGetConfigCallback(
-                this._selfInstance.InstanceId === this._masterInfo.InstanceId, statusSuccess);
+        if (data && data.AutoScalingInstances.length) {
+            var callinginstance = data.AutoScalingInstances[0];
+            if (callinginstance.AutoScalingGroupName != process.env.AUTO_SCALING_GROUP_NAME ) {
+                logger.warn(`instance ${callingInstanceId} is not in ASG: ${process.env.AUTO_SCALING_GROUP_NAME}`);
+                this._primaryRecord = await this.platform.getElectedPrimary();
+                if (this._primaryRecord && callingInstanceId === this._primaryRecord.instanceId){
+                    await this.platform.removePrimaryRecord();
+                }
+                await this.platform.deleteInstanceHealthCheck(callingInstanceId);
+                return  {
+                    'action': 'disable-autoscale'
+                };
+            }
+        } else {
+            logger.warn(`instance ${callingInstanceId} is not in ASG: ${process.env.AUTO_SCALING_GROUP_NAME}`);
+            this._primaryRecord = await this.platform.getElectedPrimary();
+            if (this._primaryRecord && callingInstanceId === this._primaryRecord.instanceId) {
+                    await this.platform.removePrimaryRecord();
+            }
+            await this.platform.deleteInstanceHealthCheck(callingInstanceId);
+            return  {
+                'action': 'disable-autoscale'
+            };
         }
-        // is myself under health check monitoring?
-        // do self health check
+        logger.info(`instance ${callingInstanceId} is in ASG: ${process.env.AUTO_SCALING_GROUP_NAME}`);
+        await this.retrievePrimary();
+        
+        
+        this._selfInstance = await this.platform.describeInstance(parameters);
+        // if it is a response from fad for getting its config and add itself to hb monitor 
+        if (fortiadcStatus) {
+            if (this._primaryInfo && this._primaryRecord) {
+                await this.handleGetConfigCallback(
+                    this._selfInstance.InstanceId === this._primaryInfo.InstanceId, statusSuccess, this._primaryRecord);
+            }
+        }
+        
+        if (this._primaryInfo && this._primaryRecord) {
+            let image_compatible = await this.checkFortiADCImageVersion(event, this._selfInstance.InstanceId === this._primaryInfo.InstanceId);
+            if (!image_compatible) {
+                return{};
+            }
+        }
+        
         selfHealthCheck = await this.platform.getInstanceHealthCheck({
             instanceId: this._selfInstance.InstanceId
         }, heartBeatInterval);
-        // if no record found, this instance not under monitor. should make sure its all
-        // lifecycle actions are complete before starting to monitor it
+        
         if (!selfHealthCheck) {
             await this.addInstanceToMonitor(this._selfInstance,
                 (Date.now() + heartBeatInterval * 1000), heartBeatInterval);
@@ -1073,42 +1377,53 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 `heartBeatLossCount: ${selfHealthCheck.heartBeatLossCount}, ` +
                 `nextHeartBeatTime: ${selfHealthCheck.nextHeartBeatTime}).`);
             if (!selfHealthCheck.healthy) {
-               // this happens when 
                // make instance shutdown. go through auto scale terminate process
+               /*
                 return  {
                 'action': 'shutdown'
                 };
+                */
+                //As I am unhealthy, I can't be the primary node, wait for the new primary.
+                if (this._primaryInfo && this._selfInstance.InstanceId != this._primaryInfo.InstanceId) {
+                    let now = Date.now();
+                    selfHealthCheck.heartBeatLossCount = 0;
+                    await this.platform.updateInstanceHealthCheck(selfHealthCheck, heartBeatInterval, 0, now);
+                    logger.info(`hb record updated on (timestamp: ${now}, instance id:` +
+                    `${this._selfInstance.InstanceId} is back on the track.`
+                    );
+                }
             } else {
 
-                // check if master is healthy. if it is not, try to run a master election
-                if (!(this._masterInfo && this._masterHealthCheck &&
-                              this._masterHealthCheck.healthy)) 
+                //check if I am running the primary election
+                if (this._primaryInfo && this._selfInstance.InstanceId === this._primaryInfo.InstanceId &&
+                    this._primaryRecord && this._primaryRecord.voteState === 'pending') {
+                     
+                    if (!await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, this._primaryRecord)) {
+                        //can't finalize the election, let others run it by pending timeout
+                    } else {
+                        this._primaryRecord.voteState = 'done';
+                    }
+                } else if (!(this._primaryInfo && this._primaryHealthCheck &&
+                              this._primaryHealthCheck.healthy)) 
                 {
-                    // if no master or master is unhealthy, try to run a master election or check if a
-                    // master election is running then wait for it to end
-                    // promiseEmitter to handle the master election process by periodically check:
-                    // 1. if there is a running election, then waits for its final
-                    // 2. if there isn't a running election, then runs an election and complete it
-                    let promiseEmitter = this.checkMasterElection.bind(this),
-                    // validator set a condition to determine if the fgt needs to keep waiting or not.
-                    validator = masterInfo => {
-                        // if i am the new master, don't wait, continue to finalize the election.
+                    // if no primary or primary is unhealthy, try to hold a primary election
+                    let promiseEmitter = this.checkPrimaryElection.bind(this),
+                    // validator set a condition to determine if the fad needs to keep waiting or not.
+                    validator = primaryInfo => {
+                        // if i am the new primary, don't wait, continue to finalize the election.
                         // should return yes to end the waiting.
-                        if (masterInfo &&
-                            masterInfo.PrivateIpAddress ===
+                        if (primaryInfo &&
+                            primaryInfo.PrivateIpAddress ===
                             this._selfInstance.PrivateIpAddress) {
-                            // isMaster = true;
                             return true;
-                        } else if (this._masterRecord && this._masterRecord.voteState === 'pending') {
-                            
-                            // if i am not the new master, and the new master hasn't come up to
+                        } else if (this._primaryRecord && this._primaryRecord.voteState === 'pending') {
+                            // if i am not the new primary, and the new primary hasn't come up to
                             // finalize the election, I should keep on waiting.
                             // should return false to continue.
-                            // this._masterRecord = null; // clear the master record cache
                             return false;
                             
-                        } else if (this._masterRecord && this._masterRecord.voteState === 'done') {
-                            // if i am not the new master, and the master election is final, then no
+                        } else if (this._primaryRecord && this._primaryRecord.voteState === 'done') {
+                            // if i am not the new primary, and the primary election is final, then no
                             // need to wait.
                             // should return true to end the waiting.
                             return true;
@@ -1120,8 +1435,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     // counter to set a time based condition to end this waiting. If script execution
                     // time is close to its timeout (6 seconds - abount 1 inteval + 1 second), ends the
                     // waiting to allow for the rest of logic to run
-                    counter = currentCount => { // eslint-disable-line no-unused-vars
-                        if (Date.now() < process.env.SCRIPT_EXECUTION_EXPIRE_TIME - 6000) {
+                    counter = currentCount => {
+                        if (Date.now() < process.env.SCRIPT_EXECUTION_EXPIRE_TIME - 3000) {
                             return false;
                         }
                         logger.warn('script execution is about to expire');
@@ -1129,53 +1444,38 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     };
 
                     try {
-                        this._masterInfo = await AutoScaleCore.waitFor(
+                        this._primaryInfo = await AutoScaleCore.waitFor(
                             promiseEmitter, validator, 5000, counter);
-                        // after new master is elected, get the new master healthcheck
-                        // there are two possible results here:
-                        // 1. a new instance comes up and becomes the new master, master healthcheck won't
-                        // exist yet because this instance isn't added to monitor.
-                        //   1.1. in this case, the instance will be added to monitor.
-                        // 2. an existing slave instance becomes the new master, master healthcheck exists
-                        // because the instance in under monitoring.
-                        //   2.1. in this case, the instance will take actions based on its healthcheck
-                        //        result.
-                        // this._masterHealthCheck = null; // invalidate the master health check object
-                        // reload the master health check object
-                        // await this.retrieveMaster(null, true);
+                        logger.info(`${this._selfInstance.InstanceId}: Check primary election done`);
+                        await this.retrievePrimary(null, true);
+                        // if this instance is the primary instance and the election is still pending, it will
+                        // finalize the primary election.
+                        if (this._primaryInfo && this._selfInstance.InstanceId === this._primaryInfo.InstanceId &&
+                            this._primaryRecord && this._primaryRecord.voteState === 'pending') {
+                            // if election couldn't be finalized, remove the current election so someone else
+                            // could start another election
+                            if (!await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, this._primaryRecord)) {
+                                await this.platform.removePrimaryRecord();
+                                this._primaryRecord = null;
+                            } else {
+                                this._primaryRecord.voteState = 'done';
+                            }
+                        }
                     } catch (error) {
-                        // if error occurs, check who is holding a master election, if it is this instance,
+                        // if error occurs, check who is holding a primary election, if it is this instance,
                         // terminates this election. then continue
-                        await this.retrieveMaster(null, true);
+                        await this.retrievePrimary(null, true);
 
-                        if (this._masterRecord.instanceId === this._selfInstance.instanceId ) {
-                            await this.platform.removeMasterRecord();
+                        if (this._primaryRecord.instanceId === this._selfInstance.InstanceId ) {
+                            await this.platform.removePrimaryRecord();
                         }
                         
-                        // await this.removeInstance(this._selfInstance);
-                        /*
-                        throw new Error('Failed to determine the master instance within ' +
+                        throw new Error('Failed to determine the primary instance within ' +
                             `${process.env.SCRIPT_EXECUTION_EXPIRE_TIME} seconds. This instance is unable` +
                             ' to bootstrap. Please report this to administrators.');
-                        */
+                        
                     }
                 }
-                await this.retrieveMaster(null, true);
-                // if this instance is the master instance and the master record is still pending, it will
-                // finalize the master election.
-                if (this._masterInfo && this._selfInstance.instanceId === this._masterInfo.instanceId &&
-                    this._masterRecord && this._masterRecord.voteState === 'pending') {
-                    // if election couldn't be finalized, remove the current election so someone else
-                    // could start another election
-                    if (!await this.platform.finalizeMasterElection()) {
-                        await this.platform.removeMasterRecord();
-                        this._masterRecord = null;
-                    }
-                    await this.retrieveMaster(null, true);
-                    
-                }
-
-
                 // update instance hb next time
                 let now = Date.now();
                 await this.platform.updateInstanceHealthCheck(selfHealthCheck, heartBeatInterval, 0, now);
@@ -1184,44 +1484,35 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 `ip: ${this._selfInstance.PrivateIpAddress}) health check ` +
                 `(${selfHealthCheck.healthy ? 'healthy' : 'unhealthy'}, ` +
                 `heartBeatLossCount: ${selfHealthCheck.heartBeatLossCount}, ` +
-                `nextHeartBeatTime: ${selfHealthCheck.nextHeartBeatTime}.` // +
-                // `syncState: ${this._selfHealthCheck.syncState}, master-ip: ${masterIp}).`
+                `nextHeartBeatTime: ${selfHealthCheck.nextHeartBeatTime}.`
                 );
-                // await this.retrieveMaster(null, true);
-                if (this._masterInfo &&
-                    this._masterRecord && this._masterRecord.voteState === 'done') {
-                    return {'master-ip':this._masterInfo.PrivateIpAddress};
-                }
-                return {};
-                
             }
-        }
             
-        
+            
+            if (this._primaryInfo &&
+                this._primaryRecord && this._primaryRecord.voteState === 'done') {
+                let fadcfgsyncport = await this.findFortiADCCfgSyncPort(event, this._selfInstance.InstanceId === this._primaryInfo.InstanceId);
+                if (fadcfgsyncport) {
+                    logger.info(`fadcfgsyncport: ${fadcfgsyncport}`);
+                    return {'primary-ip':this._primaryInfo.PrivateIpAddress, 'config-sync-port':fadcfgsyncport};
+                } else {
+                    return {'primary-ip':this._primaryInfo.PrivateIpAddress, 'config-sync-port':10443};
+                }
+            }
+            return {};
+        }
     }
 
-    async handleGetConfigCallback(isMaster, statusSuccess) {
-        let lifecycleItem, instanceProtected = false;
-        lifecycleItem = await this.completeGetConfigLifecycleAction(
+    async handleGetConfigCallback(isPrimary, statusSuccess, primary_record) {
+        await this.completeGetConfigLifecycleAction(
                 this._selfInstance.InstanceId, statusSuccess) ||
                 new AutoScaleCore.LifecycleItem(this._selfInstance.InstanceId, {},
                     AutoScaleCore.LifecycleItem.ACTION_NAME_GET_CONFIG);
-        // is it master?
-        if (isMaster) {
-            try {
-                // then protect it from scaling in
-                // instanceProtected =
-                //         await this.platform.protectInstanceFromScaleIn(
-                //             process.env.AUTO_SCALING_GROUP_NAME, lifecycleItem);
-                logger.info(`Instance (id: ${lifecycleItem.instanceId}) scaling-in` +
-                    ` protection is on: ${instanceProtected}`);
-            } catch (ex) {
-                logger.warn('Unable to protect instance from scale in:', ex);
-            }
-            // update master election from 'pending' to 'done'
-            await this.platform.finalizeMasterElection();
+        
+        if (isPrimary) {
+            await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, primary_record);
         }
-        logger.info('called handleGetConfigCallback');
+        logger.info(`${this._selfInstance.InstanceId} called handleGetConfigCallback`);
         return {};
     }
 
@@ -1257,12 +1548,12 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
         let instanceId = event.detail.EC2InstanceId,
             item = new AutoScaleCore.LifecycleItem(instanceId, event.detail,
             AutoScaleCore.LifecycleItem.ACTION_NAME_TERMINATING_INSTANCE, false);
-        // check if master
-        let masterRecord = await this.platform.getElectedMaster();
-        logger.log(`masterRecord: ${JSON.stringify(masterRecord)}`);
+        // check if primary
+        let primaryRecord = await this.platform.getElectedPrimary();
+        logger.log(`primaryRecord: ${JSON.stringify(primaryRecord)}`);
         logger.log(`lifecycle item: ${JSON.stringify(item)}`);
-        if (masterRecord && masterRecord.instanceId === item.instanceId) {
-            await this.deregisterMasterInstance(masterRecord);
+        if (primaryRecord && primaryRecord.instanceId === item.instanceId) {
+            await this.deregisterPrimaryInstance(primaryRecord);
         }
         await this.platform.completeLifecycleAction(item, true);
         await this.platform.cleanUpDbLifeCycleActions([item], true);
@@ -1273,7 +1564,7 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
     }
 
     async addInstanceToMonitor(instance, nextHeartBeatTime, heartBeatInterval = 10) {
-        logger.info('calling addInstanceToMonitor');
+        logger.info(`${instance.InstanceId}: ` + 'calling addInstanceToMonitor');
         var params = {
             Item: {
                 instanceId: instance.InstanceId,
@@ -1281,7 +1572,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 autoScalingGroupName: process.env.AUTO_SCALING_GROUP_NAME,
                 nextHeartBeatTime: nextHeartBeatTime,
                 heartBeatLossCount: 0,
-                heartBeatInterval: heartBeatInterval
+                heartBeatInterval: heartBeatInterval,
+                bornTime:Date.now() + 0
             },
             TableName: DB.AUTOSCALE.TableName
         };
@@ -1289,43 +1581,41 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
     }
 
 
-    async retrieveMaster(filters = null, reload = false) {
+    async retrievePrimary(filters = null, reload = false) {
        
         if (reload) {
-            this._masterInfo = null;
-            this._masterHealthCheck = null;
-            this._masterRecord = null;
-        }
-        if (!this._masterInfo && (!filters || filters && filters.masterInfo)) {
-            this._masterInfo = await this.getMasterInfo();
+            this._primaryInfo = null;
+            this._primaryHealthCheck = null;
+            this._primaryRecord = null;
         }
         
-          
-        if (!this._masterHealthCheck && (!filters || filters && filters.masterHealthCheck)) {
-            if (!this._masterInfo) {
-                this._masterInfo = await this.getMasterInfo();
+        if (!this._primaryRecord && (!filters || filters && filters.primaryRecord)) {
+            this._primaryRecord = await this.platform.getElectedPrimary();
+        }
+        
+        if (!this._primaryInfo && (!filters || filters && filters.primaryInfo)) {
+            if (this._primaryRecord) {
+                this._primaryInfo = await this.getPrimaryInfo(this._primaryRecord.instanceId, this._primaryRecord.ip);
             }
-            if (this._masterInfo) {
-                // TODO: master health check should not depend on the current hb
-                this._masterHealthCheck = await this.platform.getInstanceHealthCheck({
-                    instanceId: this._masterInfo.InstanceId
+        }
+
+        if (!this._primaryHealthCheck && (!filters || filters && filters.primaryHealthCheck)) {
+            if (this._primaryInfo) {
+                // TODO: primary health check should not depend on the current hb
+                this._primaryHealthCheck = await this.platform.getInstanceHealthCheck({
+                    instanceId: this._primaryInfo.InstanceId
                 });
             }
         }
-        
-        
-        if (!this._masterRecord && (!filters || filters && filters.masterRecord)) {
-            this._masterRecord = await this.platform.getElectedMaster();
-        }
-        
+
         return {
-            masterInfo: this._masterInfo,
-            masterHealthCheck: this._masterHealthCheck,
-            masterRecord: this._masterRecord
+            primaryInfo: this._primaryInfo,
+            primaryHealthCheck: this._primaryHealthCheck,
+            primaryRecord: this._primaryRecord
         };
     }
 
-    async purgeMaster(asgName) {
+    async purgePrimary(asgName) {
         const params = {
             TableName: DB.ELECTION.TableName,
             Key: { asgName: asgName },
@@ -1340,9 +1630,9 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
         return await docClient.delete(params).promise();
     }
 
-    async deregisterMasterInstance(instance) {
-        logger.info('calling deregisterMasterInstance', JSON.stringify(instance));
-        return await this.purgeMaster(process.env.AUTO_SCALING_GROUP_NAME);
+    async deregisterPrimaryInstance(instance) {
+        logger.info('calling deregisterPrimaryInstance', JSON.stringify(instance));
+        return await this.purgePrimary(process.env.AUTO_SCALING_GROUP_NAME);
     }
 
     /* eslint-disable max-len */
@@ -1353,18 +1643,12 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
      */
     /* eslint-enable max-len */
     async handleGetConfig(event) {
-        logger.info('calling handleGetConfig');
+        
         let
-            // masterIsHealthy = false,
             config,
-            // getConfigTimeout,
-            // nextTime,
-            masterInfo,
-            // masterHealthCheck,
-            // masterRecord,
-            // masterIp,
+            primaryInfo,
             callingInstanceId = this.findCallingInstanceId(event);
-
+        logger.info(`${callingInstanceId} : `+ 'calling handleGetConfig');
         // get instance object from platform
         this._selfInstance = await this.platform.describeInstance({instanceId: callingInstanceId});
         if (!this._selfInstance || this._selfInstance.VpcId !== process.env.VPC_ID) {
@@ -1372,49 +1656,42 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             throw new Error(`Unauthorized calling instance (instanceId: ${callingInstanceId}).` +
             'Instance not found in VPC.');
         }
-        // await this.retrieveMaster(null, true);
 
-        let promiseEmitter = this.checkMasterElection.bind(this),
+        let promiseEmitter = this.checkPrimaryElection.bind(this),
             validator = result => {
              
-               if (this._masterRecord && this._masterRecord.voteState === 'pending' &&
+               if (this._primaryRecord && this._primaryRecord.voteState === 'pending' &&
                    this._selfInstance &&
-                    this._masterRecord.instanceId === this._selfInstance.InstanceId) {
-                    // masterIp = this._masterRecord.ip;
+                    this._primaryRecord.instanceId === this._selfInstance.InstanceId) {
+                    // I am the primary
                     return true;
                 }
-
-                // if neither a pending master nor a master instance is found on the master
-                // scaling group. and if master-election-no-wait is enabled, allow this fgt
-                // to wake up without a master ip.
-                // this also implies this instance cannot be elected as the next maste which
-                // means it should be a slave.
-
-                // master info exists
+            
+                // primary info exists
                 if (result) {
-                    // i am the elected master
+                    // i am the elected primary
                     if (result.PrivateIpAddress ===
                         this._selfInstance.PrivateIpAddress) {
-                        // masterIp = this._selfInstance.primaryPrivateIpAddress;
                         return true;
-                    } else if (this._masterRecord) {
-                        // i am not the elected master, how is the master election going?
-                        if (this._masterRecord.voteState === 'done') {
-                            // master election done
+                    } else if (this._primaryRecord) {
+                        if (this._primaryRecord.voteState === 'done') {
+                            // primary election done
                             return true;
-                        } else if (this._masterRecord.voteState === 'pending') {
-                            // master is still pending
+                        } else if (this._primaryRecord.voteState === 'pending') {
+                            // primary is still pending
                             return false;
                         }
                     } else {
-                        // master info exists but no master record?
+                        // primary info exists but no primary record?
                         // this looks like a case that shouldn't happen. do the election again?
-                        logger.warn('master info found but master record not found. retry.');
+                        logger.warn('primary info found but primary record not found. retry.');
                         return false;
                     }
                 } else {
-                    // master cannot be elected but I cannot be the next elected master either
-                    // if not wait for the master election to complete, let me become headless
+                    //the primary ec2 instance is not there. The primary record in db is outdated
+                    //remove the primary record in db to start a primary election.
+                    logger.warn('The primary ec2 instance is not there, remove the primary record');
+                    this.platform.removePrimaryRecord();
                     return false;
                 }
             },
@@ -1426,8 +1703,9 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 return true;
             };
         try {
-           masterInfo = await AutoScaleCore.waitFor(
+           primaryInfo = await AutoScaleCore.waitFor(
            promiseEmitter, validator, 5000, counter);
+           logger.info(`${this._selfInstance.InstanceId}: Check primary election done`);
         } catch (error) {
             let message = '';
             if (error instanceof Error) {
@@ -1437,37 +1715,34 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                         error.toString() : JSON.stringify(error);
             }
             logger.warn(message);
-            // if error occurs, check who is holding a master election, if it is this instance,
-            // terminates this election. then tear down this instance whether it's master or not.
-            await this.retrieveMaster(null, true);
-            // this._masterRecord = this._masterRecord || await this.platform.getMasterRecord();
-            if (this._masterRecord.instanceId === this._selfInstance.InstanceId) {
-                await this.platform.removeMasterRecord();
+            // if error occurs, check who is holding a primary election, if it is this instance,
+            // terminates this election. then tear down this instance whether it's primary or not.
+            await this.retrievePrimary(null, true);
+            if (this._primaryRecord.instanceId === this._selfInstance.InstanceId) {
+                await this.platform.removePrimaryRecord();
             }
             await this.platform.removeInstance(this._selfInstance);
-            throw new Error('Failed to determine the master instance. This instance is unable' +
+            throw new Error('Failed to determine the primary instance. This instance is unable' +
                 ' to bootstrap. Please report this to' +
                 ' administrators.');
         }
-        // await this.retrieveMaster(null, true);
-        // the master ip same as mine? (diagram: master IP same as mine?)
-        if (masterInfo.PrivateIpAddress === this._selfInstance.PrivateIpAddress) {
-            this._step = 'handler:getConfig:getMasterConfig';
-            config = await this.getMasterConfig(await this.platform.getCallbackEndpointUrl());
-            logger.info('called handleGetConfig: returning master config' +
-            `(master-ip: ${masterInfo.PrivateIpAddress}):\n ${config}`);
+        // the primary ip same as mine? (diagram: primary IP same as mine?)
+        if (primaryInfo.PrivateIpAddress === this._selfInstance.PrivateIpAddress) {
+            this._step = 'handler:getConfig:getPrimaryConfig';
+            config = await this.getPrimaryConfig(await this.platform.getCallbackEndpointUrl());
+            logger.info('called handleGetConfig: returning primary role config' +
+            `(primary-ip: ${primaryInfo.PrivateIpAddress}):\n ${config}`);
+            await this.platform.removeOutdatedInstanceHealthCheck(this._selfInstance.InstanceId);
             return config;
         } else {
 
-            this._step = 'handler:getConfig:getSlaveConfig';
-            config = this.getSlaveConfig(masterInfo.PrivateIpAddress,
-                await this.platform.getCallbackEndpointUrl(), process.env.FORTIADC_SYNC_INTERFACE, process.env.FORTIADC_PSKSECRET, process.env.FORTIADC_ADMIN_PORT);
-            /*
-            config = await this.getSlaveConfig(masterInfo.PrivateIpAddress,
-                await this.platform.getCallbackEndpointUrl(), process.env.FORTIADC_SYNC_INTERFACE, process.env.FORTIADC_PSKSECRET, process.env.FORTIADC_ADMIN_PORT);
-            */
-            logger.info('called handleGetConfig: returning slave config' +
-                `(master-ip: ${masterInfo.PrivateIpAddress}):\n ${config}`);
+            this._step = 'handler:getConfig:getSecondaryConfig';
+            config = this.getSecondaryConfig(primaryInfo.PrivateIpAddress,
+                await this.platform.getCallbackEndpointUrl(), process.env.FORTIADC_SYNC_INTERFACE,
+                process.env.FORTIADC_ADMIN_PORT, await this.platform.addConfigSyncPort(-1));
+           
+            logger.info('called handleGetConfig: returning secondary role config' +
+                `(primary-ip: ${primaryInfo.PrivateIpAddress}):\n ${config}`);
             return config;
         }
     }
@@ -1548,6 +1823,57 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 logger.info('called findFortiADCStatus: unexpected body content format ' +
             `(${request.body})`);
                 return null;
+            }
+        }
+    }
+    async findFortiADCCfgSyncPort(request, is_primary = false) {
+        if (request.body && request.body !== '') {
+            let cfgsyncport = 10443;
+            try {
+                let jsonBodyObject = JSON.parse(request.body);
+                if (jsonBodyObject.cfgsyncport && is_primary) {
+                    logger.info('called findFortiADCCfgSyncPort: ' +
+                    `config sync port ${jsonBodyObject.cfgsyncport} found`);
+                    // add config sync port into configset
+                    cfgsyncport = await this.platform.addConfigSyncPort(jsonBodyObject.cfgsyncport);
+                } else {
+                    logger.info('called findFortiADCCfgSyncPort: cfgsyncport not found or is not primary node');
+                    //get config sync port from configset
+                    cfgsyncport = await this.platform.addConfigSyncPort(-1);
+                }
+                //logger.info(`cfgsyncport: ${cfgsyncport}`);
+                return cfgsyncport;
+            } catch (ex) {
+                logger.info('called findFortiADCCfgSyncPort: unexpected body content format ' +
+            `(${request.body})`);
+                return null;
+            }
+        }
+    }
+    async checkFortiADCImageVersion(request, is_primary = false) {
+        if (request.body && request.body !== '') {
+            let image = "";
+            try {
+                let jsonBodyObject = JSON.parse(request.body);
+                if (jsonBodyObject.image) {
+                    logger.info('called checkFortiADCImageVersion: image ' +
+                    `${jsonBodyObject.image} found`);
+                    // add config sync port into configset
+                    image = await this.platform.addFortiADCImageVersion(jsonBodyObject.image, is_primary);
+                    if (image != jsonBodyObject.image ) {
+                        logger.warn('called checkFortiADCImageVersion: image version is incompatible');
+                        return false;
+                    }
+                } else {
+                    logger.info('called checkFortiADCImageVersion: image version not found');
+                    return false;
+                }
+                //logger.info(`cfgsyncport: ${cfgsyncport}`);
+                return true;
+            } catch (ex) {
+                logger.info('called checkFortiADCImageVersion: unexpected body content format ' +
+            `(${request.body})`);
+                return false;
             }
         }
     }

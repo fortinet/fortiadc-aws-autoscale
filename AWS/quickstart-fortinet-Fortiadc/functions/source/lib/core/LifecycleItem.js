@@ -4,12 +4,12 @@
 Author: Fortinet
 *
 * Contains all the relevant information needed to complete lifecycle actions for a given
-* fortigate instance, as well as info needed to clean up the related database entry.
+* fortiadc instance, as well as info needed to clean up the related database entry.
 */
 
 module.exports = class LifecycleItem {
     /**
-     * @param {String} instanceId Id of the fortigate instance.
+     * @param {String} instanceId Id of the fortiadc instance.
      * @param {Object} detail Opaque information used by the platform to manage this item.
      * @param {String} [actionName=null] Optional name for this record to lookup. should be one in
      * ['syncconfig', 'attachnic']
@@ -48,7 +48,7 @@ module.exports = class LifecycleItem {
 
     /**
      * Return a POJO DB entry with capitalized properties.. (not sure why)
-     * @returns {Object} object {FortigateInstance, Timestamp, Detail}
+     * @returns {Object} object {fortiadcInstance, Timestamp, Detail}
      */
     toDb() {
         return {

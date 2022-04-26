@@ -23,26 +23,26 @@ module.exports = class CloudPlatform {
     }
 
     /**
-     * Submit an election vote for this ip address to become the master.
+     * Submit an election vote for this ip address to become the Primary.
      * Abstract class method.
-     * @param {String} ip Ip of the fortigate which wants to become the master
-     * @param {String} purgeMasterIp Ip of the dead master we should purge before voting
+     * @param {String} ip Ip of the fortiadc which wants to become the Primary
+     * @param {String} purgePrimaryIp Ip of the dead Primary we should purge before voting
      */
-    async putMasterElectionVote(ip, purgeMasterIp) {
+    async putPrimaryElectionVote(ip, purgePrimaryIp) {
         await this.throwNotImplementedException();
     }
     /**
-     * Get the ip address which won the master election.
+     * Get the ip address which won the Primary election.
      * Abstract class method.
-     * @returns {String} Ip of the fortigate which should be the auto-sync master
+     * @returns {String} Ip of the fortiadc which should be the auto-sync Primary
      */
-    async getElectedMaster() {
+    async getElectedPrimary() {
         await this.throwNotImplementedException();
     }
     /**
-     * Get all existing lifecyle actions for a fortigate instance from the database.
+     * Get all existing lifecyle actions for a fortiadc instance from the database.
      * Abstract class method.
-     * @param {String} instanceId Instance ID of a fortigate.
+     * @param {String} instanceId Instance ID of a fortiadc.
      * @returns {LifecycleItem} Item used by the platform to complete a lifecycleAction.
      */
     async getLifecycleItems(instanceId) {
@@ -135,7 +135,10 @@ module.exports = class CloudPlatform {
         await this.throwNotImplementedException();
     }
 
-    async updateInstanceHealthCheck(healthCheckObject, heartBeatInterval, masterIp, checkPointTime,
+    async removeOutdatedInstanceHealthCheck(aliveinstanceId) {
+        await this.throwNotImplementedException();
+    }
+    async updateInstanceHealthCheck(healthCheckObject, heartBeatInterval, PrimaryIp, checkPointTime,
         forceOutOfSync = false) {
         await this.throwNotImplementedException();
     }

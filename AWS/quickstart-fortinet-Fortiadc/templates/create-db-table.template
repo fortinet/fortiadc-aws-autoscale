@@ -10,16 +10,22 @@
             "ConstraintDescription": "must only contain uppercase and lowercase letters and digits",
             "Description": "A custom identifier as resource name prefix to help organize your DynamoDB tables. Can only contain uppercase, lowercase letters, and digits. Max length is 10."
         },
-        "UniqueId": {
+        "UniqueID": {
             "Type": "String",
             "MaxLength": "8",
             "AllowedPattern": "[A-Za-z0-9]+",
             "ConstraintDescription": "must only contain uppercase and lowercase letters and digits",
             "Description": "A random text suffix for the DynamoDB table name which can help ensure the DB table name is unique per region. Can only contain uppercase, lowercase letters, and digits. Max length is 8."
+        },
+        "ResourceTagPrefix": {
+            "Type": "String",
+            "AllowedPattern": "^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$",
+            "ConstraintDescription": "Resource tag prefix is composed of CustomIdentifier and UniqueID.",
+            "Description": "The Value for the Tag Key 'ResourceGroup' on all resources deployed in this stack."
         }
     },
     "Resources": {
-        "DdbTableMasterElection": {
+        "DdbTablePrimaryElection": {
             "Type": "AWS::DynamoDB::Table",
             "Properties": {
                 "AttributeDefinitions": [
@@ -38,6 +44,14 @@
                     "ReadCapacityUnits": "1",
                     "WriteCapacityUnits": "1"
                 },
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
+                        }
+                    }
+                ],
                 "TableName": {
                     "Fn::Join": [
                         "-",
@@ -45,9 +59,9 @@
                             {
                                 "Ref": "CustomIdentifier"
                             },
-                            "FortiadcMasterElection",
+                            "FortiadcPrimaryElection",
                             {
-                                "Ref": "UniqueId"
+                                "Ref": "UniqueID"
                             }
                         ]
                     ]
@@ -81,6 +95,14 @@
                     "ReadCapacityUnits": "1",
                     "WriteCapacityUnits": "1"
                 },
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
+                        }
+                    }
+                ],
                 "TableName": {
                     "Fn::Join": [
                         "-",
@@ -90,7 +112,7 @@
                             },
                             "FortiadcLifecycleItem",
                             {
-                                "Ref": "UniqueId"
+                                "Ref": "UniqueID"
                             }
                         ]
                     ]
@@ -116,6 +138,14 @@
                     "ReadCapacityUnits": "1",
                     "WriteCapacityUnits": "1"
                 },
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
+                        }
+                    }
+                ],
                 "TableName": {
                     "Fn::Join": [
                         "-",
@@ -125,7 +155,7 @@
                             },
                             "FortiadcAutoscale",
                             {
-                                "Ref": "UniqueId"
+                                "Ref": "UniqueID"
                             }
                         ]
                     ]
@@ -151,6 +181,14 @@
                     "ReadCapacityUnits": "1",
                     "WriteCapacityUnits": "1"
                 },
+                "Tags" : [
+                    {
+                        "Key": "ResourceGroup",
+                        "Value" : {
+                            "Ref": "ResourceTagPrefix"
+                        }
+                    }
+                ],
                 "TableName": {
                     "Fn::Join": [
                         "-",
@@ -160,7 +198,7 @@
                             },
                             "FortiadcConfigSet",
                             {
-                                "Ref": "UniqueId"
+                                "Ref": "UniqueID"
                             }
                         ]
                     ]
@@ -177,7 +215,7 @@
                     [
                         {
                             "Fn::GetAtt": [
-                                "DdbTableMasterElection",
+                                "DdbTablePrimaryElection",
                                 "Arn"
                             ]
                         },
