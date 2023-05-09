@@ -17,6 +17,6 @@ You can also use the AWS CloudFormation templates as a starting point for your o
 
 ![Architecture diagram](Architecture.png)
 
-For architectural details, step-by-step instructions, and customization options, see the [deployment guide](https://fwd.aws/xjzgv). 
+For architectural details, step-by-step instructions, and customization options, see the [deployment guide](https://docs.fortinet.com/document/fortiadc-public-cloud/latest/aws-deployment-guide/348036/deploying-autoscaling-on-aws). 
 
 To post feedback, submit feature ideas, or report bugs, use the **Issues** section of this GitHub repo. If you'd like to submit code for this Quick Start, please review the [AWS Quick Start Contributor's Kit](https://aws-quickstart.github.io/).
