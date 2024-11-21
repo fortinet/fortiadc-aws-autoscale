@@ -4,28 +4,20 @@ FortiADC Autoscale AWS Module (1.0.0-alpha)
 Author: Fortinet
 */
 exports = module.exports;
-const path = require('path');
-const AWS = require('aws-sdk');
+
+const { AutoScalingClient, DescribeAutoScalingGroupsCommand, DescribeAutoScalingInstancesCommand, CompleteLifecycleActionCommand, TerminateInstanceInAutoScalingGroupCommand } = require('@aws-sdk/client-auto-scaling');
+const { DynamoDBClient, DescribeTableCommand } = require('@aws-sdk/client-dynamodb');
+const {EC2Client, DescribeInstancesCommand, DescribeAddressesCommand, AssociateAddressCommand } = require('@aws-sdk/client-ec2');
+const { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand, DeleteCommand, GetCommand } = require("@aws-sdk/lib-dynamodb"); // CommonJS import
 const AutoScaleCore = require('fortiadc-autoscale-core');
 
 // lock the API versions
-AWS.config.apiVersions = {
-    autoscaling: '2011-01-01',
-    ec2: '2016-11-15',
-    lambda: '2015-03-31',
-    dynamodb: '2012-08-10',
-    apiGateway: '2015-07-09',
-    s3: '2006-03-01'
-};
-
 const
     EXPIRE_LIFECYCLE_ENTRY = (process.env.EXPIRE_LIFECYCLE_ENTRY || 60 * 60) * 1000,
-    autoScaling = new AWS.AutoScaling(),
-    dynamodb = new AWS.DynamoDB(),
-    docClient = new AWS.DynamoDB.DocumentClient(),
-    ec2 = new AWS.EC2(),
-    apiGateway = new AWS.APIGateway(),
-    s3 = new AWS.S3(),
+	autoScaling = new AutoScalingClient(),
+    dynamodb = new DynamoDBClient(),
+    docClient = DynamoDBDocumentClient.from(dynamodb),
+    ec2  = new EC2Client(),
     unique_id = process.env.UNIQUE_ID.replace(/.*\//, ''),
     custom_id = process.env.CUSTOM_ID.replace(/.*\//, ''),
     DB = {
@@ -160,31 +152,26 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
     }
 
     async createTable(schema) {
-        try {
-            await dynamodb.describeTable({TableName: schema.TableName}).promise();
-            console.log('found table', schema.TableName);
-        } catch (ex) {
-            console.log('creating table ', schema.TableName);
-            await dynamodb.createTable(schema, function(err, data) {
-                if (err) logger.log(`create table ${schema.TableName} failed: ${err}, ${err.stack} `); // an error occurred
-                else     logger.log(`create table ${schema.TableName} success: ${data}`);           // successful response
-            }).promise();
-        }
-        await dynamodb.waitFor('tableExists', {TableName: schema.TableName}).promise();
     }
 
     async tableExists(schema) {
+		logger.log('enter tableExists()');
+        const command = new DescribeTableCommand({
+            TableName: schema.TableName,
+        });
+        logger.log('create command');
         try {
-            await dynamodb.describeTable({ TableName: schema.TableName }).promise();
-            logger.log('found table', schema.TableName);
+            await docClient.send(command);
+            logger.info('table exists: ', schema.TableName);
             return true;
         } catch (ex) {
-            logger.error(`table (${schema.TableName}) not exists!`);
-            await this.createTable(schema);
-            return true;
+            logger.warn('table is missing', schema.TableName);
+            throw new Error(`table (${schema.TableName}) not exists!`);
+			//TODO:
+			//create tables or not
         }
     }
-
+/*
     async createTables() {
         try {
             await Promise.all([
@@ -198,49 +185,34 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             return false;
         }
     }
-    async terminateInstanceInAutoScalingGroup(instance) {
-        logger.info('calling terminateInstanceInAutoScalingGroup');
+*/
+    async removeInstance(instance) {
+        logger.info(`calling removeInstance ${instance.instanceId}`);
         let params = {
             InstanceId: instance.instanceId,
             ShouldDecrementDesiredCapacity: false
         };
+		const command = new TerminateInstanceInAutoScalingGroupCommand(params);
         try {
-            let result = await autoScaling.terminateInstanceInAutoScalingGroup(params).promise();
-            logger.info('called terminateInstanceInAutoScalingGroup. done.', result);
+            let result = await autoScaling.send(command);
+            logger.info('called removeInstance. done.', result);
             return true;
         } catch (error) {
-            logger.warn('called terminateInstanceInAutoScalingGroup. failed.', error);
+            logger.warn('called removeInstance. failed.', error);
             return false;
         }
     }
-    async removeInstance(instance) {
-        return await this.terminateInstanceInAutoScalingGroup(instance);
-    }
-    // unfortunately we can't link up the api gateway id during CFT stack creation as it
-    // would create a cycle. Grab it by looking up the rest api name passed as a parameter
-    async getCallbackEndpointUrl() {
-        let position,
-            page;
+    getCallbackEndpointUrl(request) {
         const
             gwName = process.env.API_GATEWAY_NAME,
-            region = process.env.AWS_REGION,
             stage = process.env.API_GATEWAY_STAGE_NAME,
             resource = process.env.API_GATEWAY_RESOURCE_NAME;
-        do {
 
-            this._step = 'handler:getApiGatewayUrl:getRestApis';
-            page = await apiGateway.getRestApis({
-                position
-            }).promise();
-            position = page.position;
-            const
-                gw = page.items.find(i => i.name === gwName);
-            if (gw) {
-                return `https://${gw.id}.execute-api.${region}.amazonaws.com/` +
-                    `${stage}/${resource}`;
-            }
-        } while (page.items.length);
-        throw new Error(`Api Gateway not found looking for ${gwName}`);
+        if (request.headers && request.headers['Host']) {
+			return `https://` + request.headers['Host'] +`/${stage}/${resource}` ;
+		} else {
+			throw new Error(`Api Gateway not found looking for ${gwName}`);
+		}
     }
 
     // Override
@@ -256,7 +228,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                     ':InstanceId': instanceId
                 }
             },
-            response = await docClient.query(query).promise(),
+			command = new QueryCommand(query),
+			response = await docClient.send(command),
             items = response.Items;
         if (!items || !Array.isArray(items)) {
             logger.info('called getLifecycleItems. No pending lifecycle action.');
@@ -273,8 +246,9 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
         const params = {
             TableName: DB.LIFECYCLEITEM.TableName,
             Item: item.toDb()
-        };
-        return await docClient.put(params).promise();
+        },
+		command = new PutCommand(params);
+        return !! await docClient.send(command);
     }
 
     // override
@@ -283,12 +257,12 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             const tableName = DB.LIFECYCLEITEM.TableName;
             if (!items || Array.isArray(items) && items.length === 0) {
 
-                const
-                    response = await docClient.scan({
-                        TableName: tableName,
-                        Limit: 5
-                    })
-                    .promise();
+				const params = {
+					TableName: tableName,
+					Limit: 5
+				},
+				command = new ScanCommand(params),
+                response = await dynamodb.send(command),
                 items = response.Items;
                 if (Array.isArray(items) && items.length) {
                     return await this.cleanUpDbLifeCycleActions(items);
@@ -300,13 +274,15 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 let remove = async item => {
                     logger.info('cleaning up old entry: ' +
                         `${item.instanceId} (${(Date.now() - item.timestamp) / 1000}s) ago`);
-                    await docClient.delete({
+					const params = {
                         TableName: tableName,
                         Key: {
                             instanceId: item.instanceId,
                             actionName: item.actionName
                         }
-                    }).promise();
+					},
+					command = new DeleteCommand(params);
+					await docClient.send(command);
                 };
                 items.forEach(item => {
                     if (force || (Date.now() - item.timestamp > EXPIRE_LIFECYCLE_ENTRY)) {
@@ -336,7 +312,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 // InstanceId: event.instanceId
             };
             if (!process.env.DEBUG_MODE) {
-                await autoScaling.completeLifecycleAction(params).promise();
+				const command = new CompleteLifecycleActionCommand(params);
+                await autoScaling.send(command);
             }
             logger.info(
             `[${params.LifecycleActionResult}] applied to hook[${params.LifecycleHookName}] with
@@ -365,7 +342,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                     ':primaryKeyValue': process.env.AUTO_SCALING_GROUP_NAME
                 }
             },
-            response = await docClient.scan(params).promise(),
+            command = new ScanCommand(params),
+            response = await dynamodb.send(command),
             items = response.Items;
         if (!items || items.length === 0) {
             logger.info('No elected primary was found in the db!');
@@ -381,19 +359,38 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 asgName: process.env.AUTO_SCALING_GROUP_NAME
             } 
         };
-        return await docClient.delete(params).promise();
+		const command = new DeleteCommand(params);
+        return await docClient.send(command);
     }
     async attachElasticIP(instanceId) {
         try {
-            logger.log(`${instanceId} calling attachElasticIP`);
-            let elasticIP = process.env.ElasticIP;
-    
+            let elasticIPName = process.env.ElasticIP;
+            logger.log(`${instanceId} calling findElasticIP ${elasticIPName}`);
+            const input = { // DescribeAddressesRequest
+                Filters: [ // FilterList
+                    { // Filter
+                        Name: 'tag:Name',
+                        Values: [elasticIPName]
+                    }
+                ]
+            };
+            let command = new DescribeAddressesCommand(input);
+            const response = await ec2.send(command),
+                    addresses = response.Addresses;
+            if (!addresses || !Array.isArray(addresses) || addresses.length === 0) {
+                logger.warn(`${instanceId} called attachElasticIP, error: No Public IP is found for ${elasticIPName}`);
+                return false;
+            }
+            let elasticIP = addresses[0].PublicIp;
+            logger.log(`${instanceId} calling attachElasticIP ${elasticIP}`);
             let asso_params = {
                 AllowReassociation: true,
-                PublicIp: elasticIP,
+				AllocationId:addresses[0].AllocationId,
+//                PublicIp: elasticIP,
                 InstanceId: instanceId
             };
-            let result1 = await ec2.associateAddress(asso_params).promise();
+			command = new AssociateAddressCommand(asso_params);
+            let result1 = await ec2.send(command);
             logger.log('EIP association result' + `${JSON.stringify(result1)}`);
         } catch (ex) {
             logger.warn(`${instanceId} called attachElasticIP, error:`, ex.stack);
@@ -404,20 +401,29 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
     async finalizePrimaryElection(instanceID, primary_record = null) {
         try {
             logger.info(`${instanceID} calling finalizePrimaryElection`);
-            let electedPrimary, elected_id;
+            let electedPrimary;
             if (!primary_record) electedPrimary = await this.getElectedPrimary();
             else electedPrimary = primary_record;
             electedPrimary.voteState = 'done';
-            elected_id = electedPrimary.instanceId;
+            //elected_id = electedPrimary.instanceId;
             logger.info(`hello : ${JSON.stringify(electedPrimary)}`);
             const params = {
                 TableName: DB.ELECTION.TableName,
                 Item: electedPrimary
             };
-            let result = await docClient.put(params, function(err, data) {
-                if (err) {logger.info(`${instanceID} called finalizePrimaryElection, result: ${JSON.stringify(err)}`);}
-            }).promise();
-            
+			const command = new PutCommand(params);
+			let result = false;
+			await docClient.send(command).then(
+				(data) => {
+				    logger.info(`${instanceID} called finalizePrimaryElection, data: ${JSON.stringify(data)}`);
+				    result = true;
+					// process data.
+				},
+				(error) => {
+					logger.info(`${instanceID} called finalizePrimaryElection, error: ${JSON.stringify(error)}`);
+					// error handling.
+				}
+			);
             await this.attachElasticIP(electedPrimary.instanceId);
             logger.info(`${instanceID} called finalizePrimaryElection, result: ${JSON.stringify(result)}`);
             return result;
@@ -433,7 +439,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             },
             TableName: DB.CONFIGSET.TableName
         };
-        var data = await docClient.get(searchparams).promise();
+		let command = new GetCommand(searchparams);
+        let data = await docClient.send(command);
         if (!data.Item) {
             console.log('no heartBeatLossCount');
             var params = {
@@ -443,7 +450,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 },
                 TableName: DB.CONFIGSET.TableName
             };
-            await docClient.put(params).promise();
+			command = new PutCommand(params);
+            await docClient.send(command);
         } else {
             heartBeatLossCount = data.Item.value;
         }
@@ -453,7 +461,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             },
             TableName: DB.CONFIGSET.TableName
         };
-        data = await docClient.get(searchparams).promise();
+		command = new GetCommand(searchparams);
+        data = await docClient.send(command);
         if (!data.Item) {
             console.log('no heartDelayAllowance');
             params = {
@@ -463,54 +472,41 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             },
             TableName: DB.CONFIGSET.TableName
          };
-         await docClient.put(params).promise();
-                
+		command = new PutCommand(params);
+		await docClient.send(command);
         }else {
             heartDelayAllowance = data.Item.value;
         }
-        
         return [heartBeatLossCount, heartDelayAllowance];
     }
-    async addConfigSyncPort(cfgsyncport = 10443) {
-        let port = 10443;
-        if (cfgsyncport != -1) {
-            port = cfgsyncport;
-        }
+    async getConfigSyncPort() {
         var searchparams = {
             Key: {
                 configName: 'configSyncPort'
             },
             TableName: DB.CONFIGSET.TableName
         };
+        let command = new GetCommand(searchparams);
+        let data = await docClient.send(command);
+        if (data.Item) {
+            return data.Item.value;
+        }
+        return 10443;
+    }
+    async addConfigSyncPort(cfgsyncport = 10443) {
+
         var params = {
             Item: {
                 configName: 'configSyncPort',
-                value: port
+                value: cfgsyncport
             },
             TableName: DB.CONFIGSET.TableName
         };
-        var data = await docClient.get(searchparams).promise();
-        if (!data.Item) {
-            console.log('no configSyncPort');
-            await docClient.put(params).promise();
-            return port;
-        } else {
-            if (cfgsyncport != -1 && data.Item.value != cfgsyncport) {
-                params = {
-                    Item: {
-                        configName: 'configSyncPort',
-                        value: cfgsyncport
-                    },
-                    TableName: DB.CONFIGSET.TableName
-                };
-                await docClient.put(params).promise();
-                return cfgsyncport;
-            }
-            return data.Item.value;
-        }
+        let command = new PutCommand(params);
+		await docClient.send(command);
+
     }
     async addFortiADCImageVersion(image, is_primary=false) {
-        
         var searchparams = {
             Key: {
                 configName: 'FortiADCImageVersion'
@@ -524,13 +520,14 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             },
             TableName: DB.CONFIGSET.TableName
         };
-        
+		let command = new PutCommand(params);
         if (is_primary) {
             console.log(`Update FortiADC Image Version to ${image}`);
-            await docClient.put(params).promise();
+			await docClient.send(command);
             return image;
         }
-        var data = await docClient.get(searchparams).promise();
+		command = new GetCommand(searchparams);
+        let data = await docClient.send(command);
         if (data && data.Item) {
             return data.Item.value;
         }
@@ -548,15 +545,13 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             },
             TableName: DB.AUTOSCALE.TableName
         };
-       
-            
-        let data = await docClient.get(params).promise();
+		let command = new GetCommand(params);
+        let data = await docClient.send(command);
         if (!data.Item) {
-             logger.error('getInstanceBornTime > error: no instance found' +
-            ` on instance: ${instanceId}`);
+             logger.error('getInstanceBornTime > error:' +
+            ` instance ${instanceId} is not found in the table ${DB.AUTOSCALE.TableName} `);
             return -1;
         }
-        
         return data.Item.bornTime;
     }
     /**
@@ -589,7 +584,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 inevitableFailToSyncTime,
                 interval,
                 healthCheckRecord,
-                data = await docClient.get(params).promise();
+				command = new GetCommand(params),
+				data = await docClient.send(command);
             if (!data.Item) {
                 logger.info('called getInstanceHealthCheck: no record found');
                 return null;
@@ -667,6 +663,7 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 instanceId: instance.instanceId,
                 ip: healthCheckRecord.ip || '',
                 healthy: healthy,
+                bornTime:healthCheckRecord.bornTime,
                 heartBeatLossCount: heartBeatLossCount,
                 heartBeatInterval: interval,
                 nextHeartBeatTime: Date.now() + interval * 1000,
@@ -690,26 +687,23 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
         }
         try {
             let params = {
-                Key: {
-                    instanceId: healthCheckObject.instanceId
+                Item: {
+                    instanceId: healthCheckObject.instanceId,
+                    heartBeatLossCount: healthCheckObject.heartBeatLossCount,
+                    heartBeatInterval: heartBeatInterval,
+                    nextHeartBeatTime: checkPointTime + heartBeatInterval * 1000,
+                    ip: healthCheckObject.PrivateIpAddress,
+                    autoScalingGroupName: process.env.AUTO_SCALING_GROUP_NAME,
+                    bornTime:healthCheckObject.bornTime
                 },
                 TableName: DB.AUTOSCALE.TableName,
-                UpdateExpression: 'set heartBeatLossCount = :HeartBeatLossCount, ' +
-                    'nextHeartBeatTime = :NextHeartBeatTime, ' +
-                    'heartBeatInterval = :HeartBeatInterval',
-                ExpressionAttributeValues: {
-                    ':HeartBeatLossCount': healthCheckObject.heartBeatLossCount,
-                    ':HeartBeatInterval': heartBeatInterval,
-                    ':NextHeartBeatTime': checkPointTime + heartBeatInterval * 1000
-                },
                 ConditionExpression: 'attribute_exists(instanceId)'
             };
-            
             if (!forceOutOfSync) {
                 // params.ConditionExpression += ' AND syncState = :SyncState';
             }
-            
-            let result = await docClient.update(params).promise();
+			let command = new PutCommand(params);
+			let result = !! await docClient.send(command);
             logger.info('called updateInstanceHealthCheck');
             return !!result;
         } catch (error) {
@@ -720,14 +714,14 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
     }
     async removeOutdatedInstanceHealthCheck(aliveinstanceId) {
         try {
-            let 
+            let
                 awaitAll = [],
                 unhealthyInstances = [],
-                data = await docClient.scan({
+                command = new ScanCommand({
                     TableName: DB.AUTOSCALE.TableName
-                }).promise();
-
-            let items = data.Items;
+                }),
+                data = await dynamodb.send(command),
+                items = data.Items;
             if (!(items && items.length)) {
                 logger.info('removeOudatedInstanceHealthCheck: there is no healthcheck item');
                 return null;
@@ -737,9 +731,9 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                     process.env.AUTO_SCALING_GROUP_NAME,
              ]
             };
-            let autoscaledata = await autoScaling.describeAutoScalingGroups(params).promise();
+			command = new DescribeAutoScalingGroupsCommand(params);
+			let autoscaledata = await autoScaling.send(command);
             let instance_ids = [];
-    
             autoscaledata.AutoScalingGroups.forEach(asg_resp => {
                 asg_resp.Instances.forEach(instance => {
                     if (instance.LifecycleState === "InService") {
@@ -747,7 +741,6 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                     }
                 });
             });
-            
             let item_healthy = async item => {
                 if (item.instanceId === aliveinstanceId) {
                     return true;
@@ -762,7 +755,6 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 awaitAll.push(item_healthy(item));
             });
             await Promise.all(awaitAll);
-            
             if (unhealthyInstances.length === 0) {
                 logger.info('removeOudatedInstanceHealthCheck: no unhealthy instances');
                 return null;
@@ -771,7 +763,6 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
             let deleteUnhealthItem = async instanceId => {
                 return await this.deleteInstanceHealthCheck(instanceId);
             };
-            
             unhealthyInstances.forEach(instanceId => {
                 awaitAll.push(deleteUnhealthItem(instanceId));
             });
@@ -790,7 +781,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                     instanceId: instanceId
                 }
             };
-            let result = await docClient.delete(params).promise();
+			const command = new DeleteCommand(params);
+            let result = !!await docClient.send(command);
             logger.info('called deleteInstanceHealthCheck result:' +  `${JSON.stringify(result)}`);
             return !!result;
         } catch (error) {
@@ -829,7 +821,8 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 Values: [parameters.privateIp]
             });
         }
-        const result = await ec2.describeInstances(params).promise();
+		const command = new DescribeInstancesCommand(params);
+        const result = await ec2.send(command);
         logger.info(`${parameters.instanceId}: called describeInstance, result: ${JSON.stringify(result)}`);
         return result.Reservations[0] && result.Reservations[0].Instances[0];
     }
@@ -844,51 +837,21 @@ class AwsPlatform extends AutoScaleCore.CloudPlatform {
                 Values: [localIp]
             }]
         };
-        const result = await ec2.describeInstances(params).promise();
+		const command = new DescribeInstancesCommand(params);
+        const result = await ec2.send(command);
         logger.log(localIp, 'DescribeInstances', result);
         const instance = result.Reservations[0] && result.Reservations[0].Instances[0];
         return instance && instance.InstanceId;
     }
 
     async protectInstanceFromScaleIn(asgName, item, protect = true) {
-        const
-            MAX_TRIES = 10,
-            // Delay the attempt to setInstanceProtection because it takes around a second
-            // for autoscale to switch the instance to `InService` status.
-            PROTECT_DELAY = 2000;
-        let count = 0;
-        while (true) { // eslint-disable-line no-constant-condition
-            try {
-                await runAfter(PROTECT_DELAY, () => autoScaling.setInstanceProtection({
-                    AutoScalingGroupName: asgName,
-                    InstanceIds: [item.instanceId],
-                    ProtectedFromScaleIn: protect !== false
-                }).promise());
-                return true;
-            } catch (ex) {
-                if (/\bnot in InService\b/.test(ex.message) && count < MAX_TRIES) {
-                    ++count;
-                    logger.log(`${ex.message} while protecting ${item.instanceId}:
-                        (trying again ${count}/${MAX_TRIES})`);
-                } else {
-                    throw ex;
-                }
-            }
-        }
 
-        function runAfter(interval, callback) {
-            const precision = Math.max(0, 3 - Math.log10(interval / 100));
-            logger.log(`Delaying for ${(interval / 1000).toFixed(precision)}s > `,
-                callback.toString()
-                .replace(/.*(?:function|=>)\s*(.*?)(?:[(\n]|$)(?:\n|.)*/, '$1'));
-            return new Promise(resolve => setTimeout(() => resolve(callback()), interval));
-        }
     }
 }
 
 class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
-    constructor(platform = new AwsPlatform(), baseConfig = '') {
-        super(platform, baseConfig);
+    constructor(platform = new AwsPlatform()) {
+        super(platform);
         this._step = '';
         this._selfInstance = null;
         this._init = false;
@@ -900,8 +863,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
 
     async init() {
         this._init = await this.platform.init();
-        // retrieve base config from an S3 bucket
-        this._baseConfig = await this.getBaseConfig();
     }
 
     async handle(event, context, callback) {
@@ -990,7 +951,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     subnetId: candidateInstance.SubnetId,
                     voteState: 'pending',
                     voteEndTime: process.env.SCRIPT_EXECUTION_EXPIRE_TIME - 6000
-                    
                 },
                 ConditionExpression: 'attribute_not_exists(asgName)'
             };
@@ -1009,7 +969,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 logger.log('no Primary purge');
             }
             //select new Primary
-            
             let healthyInstances = [],
                 InserviceInstances = [],
                 awaitAll = [],
@@ -1019,8 +978,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     process.env.AUTO_SCALING_GROUP_NAME,
                 ]
             };
-            let autoscaledata = await autoScaling.describeAutoScalingGroups(autosclaing_params).promise();
-        
+			let command = new DescribeAutoScalingGroupsCommand(autosclaing_params);
+			let autoscaledata = await autoScaling.send(command);
             autoscaledata.AutoScalingGroups.forEach(asg_resp => {
                 asg_resp.Instances.forEach(instance => {
                     if (instance.LifecycleState === "InService" && instance.InstanceId != original_primary_id) {
@@ -1029,15 +988,13 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     }
                 });
             });
-            
             if (!(InserviceInstances && InserviceInstances.length)) {
                 logger.info('putPrimaryElectionVote() called, but no instance in service. At init stage!');
                 logger.info(`Put calling instance ${candidateInstance.InstanceId} into election`);
-                return !!await docClient.put(params).promise();
-                
+				let docCommand = new PutCommand(params);
+				return !!await docClient.send(docCommand);
             }
             logger.log(`InService instance count(${InserviceInstances.length}), members: (${JSON.stringify(InserviceInstances)})`);
-        
             let gethealthyitem = async instanceId => {
                 let hcresult = await this.platform.getInstanceHealthCheck({
             instanceId: instanceId});
@@ -1057,10 +1014,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 logger.error('putPrimaryElectionVote() called, but no healthy instance found. ' +
                             'should not happen!');
                 return false;
-                
             }
             logger.log(`HealthyInstances count(${healthyInstances.length}), members: (${JSON.stringify(healthyInstances)})`);
-            
             let getBornTime = async instanceId => {
                 let bornTime = await this.platform.getInstanceBornTime(instanceId);
                 if (bornTime > 0) {
@@ -1076,7 +1031,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             if (!(bornTimesInstances && bornTimesInstances.length)) {
                 logger.info('putPrimaryElectionVote() called, but no bornTimes found. The instance may not send sync callback yet');
                 logger.info(`Put calling instance ${candidateInstance.InstanceId} into election`);
-                return !!await docClient.put(params).promise();
+                command = new PutCommand(params);
+                return !! await docClient.send(command);
             }
 
             let eaylyestTime = 0,
@@ -1095,7 +1051,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 logger.error('putPrimaryElectionVote() called, but no earlyest instance found. ' +
                             'should not happen!');
                 logger.error(`Put calling instance ${candidateInstance.InstanceId} into election due to no earlyest instance found`);
-                return !!await docClient.put(params).promise();
+                command = new PutCommand(params);
+                return !! await docClient.send(command);
             }
             logger.info(`new selected primary (instanceId: ${primaryInstanceId})`);
             let seeded_primary = await this.platform.describeInstance({instanceId: primaryInstanceId});
@@ -1112,7 +1069,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 },
                 ConditionExpression: 'attribute_not_exists(asgName)'
             };
-            return !!await docClient.put(params).promise();
+            command = new PutCommand(params);
+            return !! await docClient.send(command);
         } catch (ex) {
             console.warn('exception while putPrimaryElectionVote',
                 JSON.stringify(candidateInstance), JSON.stringify(purgePrimaryRecord), ex.stack);
@@ -1139,8 +1097,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             original_primary_id = this._primaryRecord.instanceId;
         }
         logger.info('current primary node healthcheck:', JSON.stringify(this._primaryHealthCheck));
-        
-        
         if (this._primaryRecord && this._primaryRecord.voteState === 'done') {
             // if primary is unhealthy, we need a new election
             if (!this._primaryHealthCheck ||
@@ -1163,7 +1119,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             purgePrimary = false;
         }
         if (needElection) {
-           
             // try to put myself as the primary candidate
             electionLock = await this.putPrimaryElectionVote(this._selfInstance, original_primary_id, purgePrimary);
             if (electionLock) {
@@ -1173,7 +1128,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     logger.info(`Election completed: ${electionComplete}`);
                     this._primaryInfo = electionComplete && await this.getPrimaryInfo(this._primaryRecord.instanceId, this._primaryRecord.ip);
                     this._primaryRecord = null;
-                    
                     } catch (error) {
                         logger.error('Something went wrong in the primary election.');
                     }
@@ -1194,63 +1148,37 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     configName: name
                 }
             },
-            response = await docClient.get(query).promise();
+			command = new GetCommand(query),
+            response = await docClient.send(command);
         return response && response.Item && response.Item.configContent;
     }
 
-    async getConfigSetFromS3(configName) {
-        let data = await s3.getObject({
-            Bucket: process.env.STACK_ASSETS_S3_BUCKET_NAME,
-            Key: path.join(process.env.STACK_ASSETS_S3_KEY_PREFIX, 'configset', configName)
-        }).promise();
-
-        return data && data.Body && data.Body.toString('ascii');
-    }
-
     // override
-    async getBaseConfig() {
-        let baseConfig = await this.getConfigSetFromS3('baseconfig');
-        if (baseConfig) {
-            // check if other config set are required
-            let requiredConfigSet = process.env.REQUIRED_CONFIG_SET.split(',');
-            let configContent = '', elbWebRequired = false;
-            for (let configset of requiredConfigSet) {
-                let [name, selected] = configset.trim().split('-');
-                if (selected.toLowerCase() === 'yes') {
-                    switch (name) {
-                        case 'httpsroutingpolicy':
-                            elbWebRequired = true;
-                            configContent = await this.getConfigSetFromS3(name);
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            }
-            if (elbWebRequired) {
-                configContent = await this.getConfigSetFromS3('internalelbweb') + configContent;
-            }
-            baseConfig = baseConfig + configContent;
-
-            baseConfig = baseConfig
-                .replace(new RegExp('{SYNC_INTERFACE}', 'gm'),
-                    process.env.FORTIADC_SYNC_INTERFACE ?
-                        process.env.FORTIADC_SYNC_INTERFACE : 'port1')
-                .replace(new RegExp('{ADMIN_PORT}', 'gm'),
-                    process.env.FORTIADC_ADMIN_PORT ? process.env.FORTIADC_ADMIN_PORT : 8443);
-        }
-        return baseConfig;
-    }
-
-    // override
-    async getPrimaryConfig(callbackUrl) {
+    async getPrimaryConfig(callbackUrl, cfg_sync_port) {
         // no dollar sign in place holders
-        return await this._baseConfig.replace(/\{CALLBACK_URL}/, callbackUrl);
+		let syncIntf = process.env.FORTIADC_SYNC_INTERFACE ? process.env.FORTIADC_SYNC_INTERFACE : 'port1';
+		let adminPort = process.env.FORTIADC_ADMIN_PORT ? process.env.FORTIADC_ADMIN_PORT : 8443;
+        let primaryConfig = `
+        config system global
+            set port-https ${adminPort}
+            set port-http 8080
+            set cloud-autoscale enable
+        end
+
+        config system auto-scale
+            set status enable
+            set sync-interface ${syncIntf}
+            set role primary
+            set callback-url ${callbackUrl}
+            set config-sync-port ${cfg_sync_port}
+        end
+        `;
+        //return await this._baseConfig.replace(/\{CALLBACK_URL}/, callbackUrl);
+        return primaryConfig;
     }
 
     async getPrimaryInfo(instanceId, primaryIp) {
         logger.info('calling getPrimaryInfo');
-       
         return await this.platform.describeInstance({instanceId:instanceId, privateIp: primaryIp});
     }
 
@@ -1280,7 +1208,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     result = await this.handleTerminatingInstanceHook(event);
                 }
                 */
-                
                 break;
             case 'EC2 Instance Terminate Successful':
                 await this.platform.cleanUpDbLifeCycleActions();
@@ -1314,7 +1241,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             callingInstanceId
           ]
         };
-        let data = await autoScaling.describeAutoScalingInstances(params).promise();
+        let command = new DescribeAutoScalingInstancesCommand(params);
+        let data = await autoScaling.send(command);
 
         if (data && data.AutoScalingInstances.length) {
             var callinginstance = data.AutoScalingInstances[0];
@@ -1341,166 +1269,147 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             };
         }
         logger.info(`instance ${callingInstanceId} is in ASG: ${process.env.AUTO_SCALING_GROUP_NAME}`);
-        await this.retrievePrimary();
-        
-        
         this._selfInstance = await this.platform.describeInstance(parameters);
-        // if it is a response from fad for getting its config and add itself to hb monitor 
-        if (fortiadcStatus) {
-            if (this._primaryInfo && this._primaryRecord) {
-                await this.handleGetConfigCallback(
-                    this._selfInstance.InstanceId === this._primaryInfo.InstanceId, statusSuccess, this._primaryRecord);
-            }
-        }
-        
+        await this.retrievePrimary();
         if (this._primaryInfo && this._primaryRecord) {
             let image_compatible = await this.checkFortiADCImageVersion(event, this._selfInstance.InstanceId === this._primaryInfo.InstanceId);
             if (!image_compatible) {
-                return{};
+                await this.platform.deleteInstanceHealthCheck(callingInstanceId);
+                return  {
+                    'action': 'disable-autoscale'
+                };
             }
         }
-        
-        selfHealthCheck = await this.platform.getInstanceHealthCheck({
+         selfHealthCheck = await this.platform.getInstanceHealthCheck({
             instanceId: this._selfInstance.InstanceId
         }, heartBeatInterval);
-        
-        if (!selfHealthCheck) {
+         if (!selfHealthCheck) {
             await this.addInstanceToMonitor(this._selfInstance,
                 (Date.now() + heartBeatInterval * 1000), heartBeatInterval);
             logger.info(`instance (id:${this._selfInstance.InstanceId}, ` +
                 `ip: ${this._selfInstance.PrivateIpAddress}) is added to monitor.`);
-            return {};
-        } else {
-            logger.info(`instance (id:${this._selfInstance.InstanceId}, ` +
+         }
+        if (fortiadcStatus) {
+            if (this._primaryInfo && this._primaryRecord) {
+                await this.handleGetConfigCallback(
+                    this._selfInstance.InstanceId === this._primaryInfo.InstanceId, statusSuccess, this._primaryRecord);
+                return {};
+            }
+        }
+
+        logger.info(`instance (id:${this._selfInstance.InstanceId}, ` +
                 `ip: ${this._selfInstance.PrivateIpAddress}) health check ` +
                 `(${selfHealthCheck.healthy ? 'healthy' : 'unhealthy'}, ` +
                 `heartBeatLossCount: ${selfHealthCheck.heartBeatLossCount}, ` +
                 `nextHeartBeatTime: ${selfHealthCheck.nextHeartBeatTime}).`);
-            if (!selfHealthCheck.healthy) {
-               // make instance shutdown. go through auto scale terminate process
-               /*
-                return  {
-                'action': 'shutdown'
-                };
-                */
-                //As I am unhealthy, I can't be the primary node, wait for the new primary.
-                if (this._primaryInfo && this._selfInstance.InstanceId != this._primaryInfo.InstanceId) {
-                    let now = Date.now();
-                    selfHealthCheck.heartBeatLossCount = 0;
-                    await this.platform.updateInstanceHealthCheck(selfHealthCheck, heartBeatInterval, 0, now);
-                    logger.info(`hb record updated on (timestamp: ${now}, instance id:` +
-                    `${this._selfInstance.InstanceId} is back on the track.`
-                    );
-                }
-            } else {
-
-                //check if I am running the primary election
-                if (this._primaryInfo && this._selfInstance.InstanceId === this._primaryInfo.InstanceId &&
-                    this._primaryRecord && this._primaryRecord.voteState === 'pending') {
-                     
-                    if (!await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, this._primaryRecord)) {
-                        //can't finalize the election, let others run it by pending timeout
-                    } else {
-                        this._primaryRecord.voteState = 'done';
-                    }
-                } else if (!(this._primaryInfo && this._primaryHealthCheck &&
-                              this._primaryHealthCheck.healthy)) 
-                {
-                    // if no primary or primary is unhealthy, try to hold a primary election
-                    let promiseEmitter = this.checkPrimaryElection.bind(this),
-                    // validator set a condition to determine if the fad needs to keep waiting or not.
-                    validator = primaryInfo => {
-                        // if i am the new primary, don't wait, continue to finalize the election.
-                        // should return yes to end the waiting.
-                        if (primaryInfo &&
-                            primaryInfo.PrivateIpAddress ===
-                            this._selfInstance.PrivateIpAddress) {
-                            return true;
-                        } else if (this._primaryRecord && this._primaryRecord.voteState === 'pending') {
-                            // if i am not the new primary, and the new primary hasn't come up to
-                            // finalize the election, I should keep on waiting.
-                            // should return false to continue.
-                            return false;
-                            
-                        } else if (this._primaryRecord && this._primaryRecord.voteState === 'done') {
-                            // if i am not the new primary, and the primary election is final, then no
-                            // need to wait.
-                            // should return true to end the waiting.
-                            return true;
-                        } else {
-                            return false;
-                            
-                        }
-                    },
-                    // counter to set a time based condition to end this waiting. If script execution
-                    // time is close to its timeout (6 seconds - abount 1 inteval + 1 second), ends the
-                    // waiting to allow for the rest of logic to run
-                    counter = currentCount => {
-                        if (Date.now() < process.env.SCRIPT_EXECUTION_EXPIRE_TIME - 3000) {
-                            return false;
-                        }
-                        logger.warn('script execution is about to expire');
-                        return true;
-                    };
-
-                    try {
-                        this._primaryInfo = await AutoScaleCore.waitFor(
-                            promiseEmitter, validator, 5000, counter);
-                        logger.info(`${this._selfInstance.InstanceId}: Check primary election done`);
-                        await this.retrievePrimary(null, true);
-                        // if this instance is the primary instance and the election is still pending, it will
-                        // finalize the primary election.
-                        if (this._primaryInfo && this._selfInstance.InstanceId === this._primaryInfo.InstanceId &&
-                            this._primaryRecord && this._primaryRecord.voteState === 'pending') {
-                            // if election couldn't be finalized, remove the current election so someone else
-                            // could start another election
-                            if (!await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, this._primaryRecord)) {
-                                await this.platform.removePrimaryRecord();
-                                this._primaryRecord = null;
-                            } else {
-                                this._primaryRecord.voteState = 'done';
-                            }
-                        }
-                    } catch (error) {
-                        // if error occurs, check who is holding a primary election, if it is this instance,
-                        // terminates this election. then continue
-                        await this.retrievePrimary(null, true);
-
-                        if (this._primaryRecord.instanceId === this._selfInstance.InstanceId ) {
-                            await this.platform.removePrimaryRecord();
-                        }
-                        
-                        throw new Error('Failed to determine the primary instance within ' +
-                            `${process.env.SCRIPT_EXECUTION_EXPIRE_TIME} seconds. This instance is unable` +
-                            ' to bootstrap. Please report this to administrators.');
-                        
-                    }
-                }
-                // update instance hb next time
+        if (!selfHealthCheck.healthy) {
                 let now = Date.now();
+                selfHealthCheck.heartBeatLossCount = 0;
                 await this.platform.updateInstanceHealthCheck(selfHealthCheck, heartBeatInterval, 0, now);
                 logger.info(`hb record updated on (timestamp: ${now}, instance id:` +
-                `${this._selfInstance.InstanceId}, ` +
-                `ip: ${this._selfInstance.PrivateIpAddress}) health check ` +
-                `(${selfHealthCheck.healthy ? 'healthy' : 'unhealthy'}, ` +
-                `heartBeatLossCount: ${selfHealthCheck.heartBeatLossCount}, ` +
-                `nextHeartBeatTime: ${selfHealthCheck.nextHeartBeatTime}.`
+                `${this._selfInstance.InstanceId} is back on the track.`
                 );
-            }
-            
-            
-            if (this._primaryInfo &&
-                this._primaryRecord && this._primaryRecord.voteState === 'done') {
-                let fadcfgsyncport = await this.findFortiADCCfgSyncPort(event, this._selfInstance.InstanceId === this._primaryInfo.InstanceId);
-                if (fadcfgsyncport) {
-                    logger.info(`fadcfgsyncport: ${fadcfgsyncport}`);
-                    return {'primary-ip':this._primaryInfo.PrivateIpAddress, 'config-sync-port':fadcfgsyncport};
+
+        } else {
+
+            //check if I am running the primary election
+            if (this._primaryInfo && this._selfInstance.InstanceId === this._primaryInfo.InstanceId &&
+                this._primaryRecord && this._primaryRecord.voteState === 'pending') {
+                if (!await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, this._primaryRecord)) {
+                    //can't finalize the election, let others run it by pending timeout
                 } else {
-                    return {'primary-ip':this._primaryInfo.PrivateIpAddress, 'config-sync-port':10443};
+                    this._primaryRecord.voteState = 'done';
+                }
+            } else if (!(this._primaryInfo && this._primaryHealthCheck &&
+                              this._primaryHealthCheck.healthy)) {
+                // if no primary or primary is unhealthy, try to hold a primary election
+                let promiseEmitter = this.checkPrimaryElection.bind(this),
+                // validator set a condition to determine if the fad needs to keep waiting or not.
+                validator = primaryInfo => {
+                    // if i am the new primary, don't wait, continue to finalize the election.
+                    // should return yes to end the waiting.
+                    if (primaryInfo &&
+                        primaryInfo.PrivateIpAddress ===
+                        this._selfInstance.PrivateIpAddress) {
+                        return true;
+                    } else if (this._primaryRecord && this._primaryRecord.voteState === 'pending') {
+                        // if i am not the new primary, and the new primary hasn't come up to
+                        // finalize the election, I should keep on waiting.
+                        // should return false to continue.
+                        return false;
+                    } else if (this._primaryRecord && this._primaryRecord.voteState === 'done') {
+                        // if i am not the new primary, and the primary election is final, then no
+                        // need to wait.
+                        // should return true to end the waiting.
+                        return true;
+                    } else {
+                        return false;
+                    }
+                },
+                // counter to set a time based condition to end this waiting. If script execution
+                // time is close to its timeout (6 seconds - abount 1 inteval + 1 second), ends the
+                // waiting to allow for the rest of logic to run
+                counter = currentCount => {
+                    if (Date.now() < process.env.SCRIPT_EXECUTION_EXPIRE_TIME - 3000) {
+                        return false;
+                    }
+                    logger.warn('script execution is about to expire');
+                    return true;
+                };
+
+                try {
+                    this._primaryInfo = await AutoScaleCore.waitFor(
+                        promiseEmitter, validator, 5000, counter);
+                    logger.info(`${this._selfInstance.InstanceId}: Check primary election done`);
+                    await this.retrievePrimary(null, true);
+                    // if this instance is the primary instance and the election is still pending, it will
+                    // finalize the primary election.
+                    if (this._primaryInfo && this._selfInstance.InstanceId === this._primaryInfo.InstanceId &&
+                        this._primaryRecord && this._primaryRecord.voteState === 'pending') {
+                        // if election couldn't be finalized, remove the current election so someone else
+                        // could start another election
+                        if (!await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, this._primaryRecord)) {
+                            await this.platform.removePrimaryRecord();
+                            this._primaryRecord = null;
+                        } else {
+                            this._primaryRecord.voteState = 'done';
+                        }
+                    }
+                } catch (error) {
+                       // if error occurs, check who is holding a primary election, if it is this instance,
+                       // terminates this election. then continue
+                    await this.retrievePrimary(null, true);
+
+                    if (this._primaryRecord.instanceId === this._selfInstance.InstanceId ) {
+                        await this.platform.removePrimaryRecord();
+                    }
+                    throw new Error('Failed to determine the primary instance within ' +
+                        `${process.env.SCRIPT_EXECUTION_EXPIRE_TIME} seconds. This instance is unable` +
+                        ' to bootstrap. Please report this to administrators.');
                 }
             }
-            return {};
+            // update instance hb next time
+            let now = Date.now();
+            await this.platform.updateInstanceHealthCheck(selfHealthCheck, heartBeatInterval, 0, now);
+            logger.info(`hb record updated on (timestamp: ${now}, instance id:` +
+            `${this._selfInstance.InstanceId}, ` +
+            `ip: ${this._selfInstance.PrivateIpAddress}) health check ` +
+            `(${selfHealthCheck.healthy ? 'healthy' : 'unhealthy'}, ` +
+            `heartBeatLossCount: ${selfHealthCheck.heartBeatLossCount}, ` +
+            `nextHeartBeatTime: ${selfHealthCheck.nextHeartBeatTime}.`
+            );
         }
+        if (this._primaryInfo &&
+            this._primaryRecord && this._primaryRecord.voteState === 'done') {
+            let fadcfgsyncport = await this.findFortiADCCfgSyncPort(event, this._selfInstance.InstanceId === this._primaryInfo.InstanceId);
+            if (fadcfgsyncport) {
+                logger.info(`fadcfgsyncport: ${fadcfgsyncport}`);
+                return {'primary-ip':this._primaryInfo.PrivateIpAddress, 'config-sync-port':fadcfgsyncport};
+            } else {
+                return {'primary-ip':this._primaryInfo.PrivateIpAddress, 'config-sync-port':10443};
+            }
+        }
+        return {};
     }
 
     async handleGetConfigCallback(isPrimary, statusSuccess, primary_record) {
@@ -1508,7 +1417,6 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 this._selfInstance.InstanceId, statusSuccess) ||
                 new AutoScaleCore.LifecycleItem(this._selfInstance.InstanceId, {},
                     AutoScaleCore.LifecycleItem.ACTION_NAME_GET_CONFIG);
-        
         if (isPrimary) {
             await this.platform.finalizePrimaryElection(this._selfInstance.InstanceId, primary_record);
         }
@@ -1577,22 +1485,20 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
             },
             TableName: DB.AUTOSCALE.TableName
         };
-        return await docClient.put(params).promise();
+		const command = new PutCommand(params);
+        return await docClient.send(command);
     }
 
 
     async retrievePrimary(filters = null, reload = false) {
-       
         if (reload) {
             this._primaryInfo = null;
             this._primaryHealthCheck = null;
             this._primaryRecord = null;
         }
-        
         if (!this._primaryRecord && (!filters || filters && filters.primaryRecord)) {
             this._primaryRecord = await this.platform.getElectedPrimary();
         }
-        
         if (!this._primaryInfo && (!filters || filters && filters.primaryInfo)) {
             if (this._primaryRecord) {
                 this._primaryInfo = await this.getPrimaryInfo(this._primaryRecord.instanceId, this._primaryRecord.ip);
@@ -1627,7 +1533,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 ':asgName': asgName
             }
         };
-        return await docClient.delete(params).promise();
+		const command = new DeleteCommand(params);
+		return !!await docClient.send(command);
     }
 
     async deregisterPrimaryInstance(instance) {
@@ -1643,11 +1550,12 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
      */
     /* eslint-enable max-len */
     async handleGetConfig(event) {
-        
         let
             config,
             primaryInfo,
+			callbackUrl = this.platform.getCallbackEndpointUrl(event),
             callingInstanceId = this.findCallingInstanceId(event);
+
         logger.info(`${callingInstanceId} : `+ 'calling handleGetConfig');
         // get instance object from platform
         this._selfInstance = await this.platform.describeInstance({instanceId: callingInstanceId});
@@ -1659,14 +1567,12 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
 
         let promiseEmitter = this.checkPrimaryElection.bind(this),
             validator = result => {
-             
                if (this._primaryRecord && this._primaryRecord.voteState === 'pending' &&
                    this._selfInstance &&
                     this._primaryRecord.instanceId === this._selfInstance.InstanceId) {
                     // I am the primary
                     return true;
                 }
-            
                 // primary info exists
                 if (result) {
                     // i am the elected primary
@@ -1726,10 +1632,15 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                 ' to bootstrap. Please report this to' +
                 ' administrators.');
         }
-        // the primary ip same as mine? (diagram: primary IP same as mine?)
+        if (primaryInfo.PrivateIpAddress == null) {
+            throw new Error('Failed to determine the primary instance. This instance is unable' +
+                ' to bootstrap. Please report this to' +
+                ' administrators.');
+		}
+	    let cfg_sync_port = await this.platform.getConfigSyncPort();
         if (primaryInfo.PrivateIpAddress === this._selfInstance.PrivateIpAddress) {
             this._step = 'handler:getConfig:getPrimaryConfig';
-            config = await this.getPrimaryConfig(await this.platform.getCallbackEndpointUrl());
+            config = await this.getPrimaryConfig(callbackUrl, cfg_sync_port);
             logger.info('called handleGetConfig: returning primary role config' +
             `(primary-ip: ${primaryInfo.PrivateIpAddress}):\n ${config}`);
             await this.platform.removeOutdatedInstanceHealthCheck(this._selfInstance.InstanceId);
@@ -1738,9 +1649,8 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
 
             this._step = 'handler:getConfig:getSecondaryConfig';
             config = this.getSecondaryConfig(primaryInfo.PrivateIpAddress,
-                await this.platform.getCallbackEndpointUrl(), process.env.FORTIADC_SYNC_INTERFACE,
-                process.env.FORTIADC_ADMIN_PORT, await this.platform.addConfigSyncPort(-1));
-           
+                callbackUrl, process.env.FORTIADC_SYNC_INTERFACE,
+                process.env.FORTIADC_ADMIN_PORT, cfg_sync_port);
             logger.info('called handleGetConfig: returning secondary role config' +
                 `(primary-ip: ${primaryInfo.PrivateIpAddress}):\n ${config}`);
             return config;
@@ -1837,9 +1747,9 @@ class AwsAutoscaleHandler extends AutoScaleCore.AutoscaleHandler {
                     // add config sync port into configset
                     cfgsyncport = await this.platform.addConfigSyncPort(jsonBodyObject.cfgsyncport);
                 } else {
-                    logger.info('called findFortiADCCfgSyncPort: cfgsyncport not found or is not primary node');
+                    logger.info('called findFortiADCCfgSyncPort: cfgsyncport not found in http request or instance is not primary node');
                     //get config sync port from configset
-                    cfgsyncport = await this.platform.addConfigSyncPort(-1);
+                    cfgsyncport = await this.platform.getConfigSyncPort();
                 }
                 //logger.info(`cfgsyncport: ${cfgsyncport}`);
                 return cfgsyncport;
@@ -1899,10 +1809,6 @@ exports.AwsAutoscaleHandler = AwsAutoscaleHandler;
  */
 exports.initModule = () => {
     process.env.SCRIPT_EXECUTION_TIME_CHECKPOINT = Date.now();
-
-    AWS.config.update({
-        region: process.env.AWS_REGION
-    });
     /**
      * expose the module runtime id
      * @returns {String} a unique id.

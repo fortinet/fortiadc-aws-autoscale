@@ -12,10 +12,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fortinet/fortigate-autoscale"
+    "url": "git+https://github.com/fortinet/fortiadc-aws-autoscale"
   },
   "dependencies": {
-    "fortiadc-autoscale-aws": "file:lib/aws"
+    "fortiadc-autoscale-aws": "file:lib/aws",
+    "fortiadc-autoscale-core": "file:lib/core"
   },
   "devDependencies": {
     "eslint": "^5.4.0",
